@@ -10,13 +10,27 @@ wire contract changes.
 
 ## Quick Start
 
-Set a complete authenticated Cookie header in the process environment:
+Read a complete authenticated Cookie header into the process environment
+without placing it in shell history:
 
 ```bash
-export PP_SUBSTACK_SESSION_COOKIE='connect.sid=...'
+read -rs PP_SUBSTACK_SESSION_COOKIE
+export PP_SUBSTACK_SESSION_COOKIE
 ```
 
-Create a draft:
+Paste the value at the silent prompt and press Enter. For automation, inject
+the variable from the runtime's encrypted secret store.
+
+Reconcile the marker before creating:
+
+```bash
+pp-substack drafts find \
+  --publication gtmengineersearch \
+  --correlation-marker gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d \
+  --json
+```
+
+Create only when that command exits `0` with `{"found":false}`:
 
 ```bash
 pp-substack drafts create \
@@ -54,9 +68,10 @@ Status values are strict:
   `null`.
 
 The correlation marker must be a visible `gtme-issue:<uuid>` token that occurs
-exactly once in the Markdown. The converter supports headings, paragraphs,
-bullet lists, strong emphasis, absolute HTTP(S) links, and Markdown escapes
-used by the GTME newsletter composer.
+exactly once in the Markdown. The converter supports heading levels 1–6,
+paragraphs, bullet lists, strong and italic emphasis, horizontal rules,
+absolute HTTP(S) links, HTML entities, and Markdown escapes used by the GTME
+newsletter composer.
 
 ## Agent Usage
 
@@ -138,4 +153,3 @@ Tags produce only the two required release archives:
 
 `checksums.txt` contains SHA-256 digests. Builds use `CGO_ENABLED=0`,
 `-trimpath`, and an empty Go build ID.
-

@@ -101,10 +101,11 @@ func TestFindByMarkerReturnsDraftFromManagementFeed(t *testing.T) {
 		"/api/v1/post_management/drafts": {
 			status: http.StatusOK,
 			body: map[string]any{
-				"posts":  []any{map[string]any{"id": 208706412}},
-				"total":  1,
-				"limit":  100,
-				"offset": 0,
+				"posts":    []any{map[string]any{"id": 208706412}},
+				"total":    1,
+				"limit":    100,
+				"offset":   0,
+				"isCapped": false,
 			},
 		},
 		"/api/v1/drafts/208706412": {
@@ -179,7 +180,10 @@ func TestFindByMarkerPreservesScheduledFeedTimestamp(t *testing.T) {
 						"trigger_at": scheduledAt,
 					},
 				},
-				"total": 1,
+				"total":    1,
+				"limit":    100,
+				"offset":   0,
+				"isCapped": false,
 			},
 		},
 		"/api/v1/drafts/208706412": {
@@ -190,6 +194,179 @@ func TestFindByMarkerPreservesScheduledFeedTimestamp(t *testing.T) {
 			},
 		},
 		"/api/v1/post_management/published": emptyFeed(),
+	})
+	defer server.Close()
+
+	client := mustClient(t, server, "connect.sid=session")
+	result, err := client.FindByMarker(context.Background(), marker)
+	if err != nil {
+		t.Fatalf("FindByMarker() error = %v", err)
+	}
+	if !result.Found || result.Post == nil {
+		t.Fatalf("result = %#v, want found post", result)
+	}
+	assertPost(t, *result.Post, "208706412", "scheduled", marker, stringPointer(scheduledAt), nil)
+}
+
+func TestFindByMarkerRejectsScheduledFeedRowWithoutTriggerAt(t *testing.T) {
+	t.Parallel()
+
+	server := newRouteServer(t, map[string]routeResponse{
+		"/api/v1/post_management/drafts": emptyFeed(),
+		"/api/v1/post_management/scheduled": {
+			status: http.StatusOK,
+			body: map[string]any{
+				"posts":    []any{map[string]any{"id": 208706412}},
+				"total":    1,
+				"limit":    100,
+				"offset":   0,
+				"isCapped": false,
+			},
+		},
+	})
+	defer server.Close()
+
+	client := mustClient(t, server, "connect.sid=session")
+	result, err := client.FindByMarker(
+		context.Background(),
+		"gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d",
+	)
+	if err == nil || !strings.Contains(err.Error(), "scheduled feed row") {
+		t.Fatalf("result = %#v, error = %v; want lifecycle-evidence error", result, err)
+	}
+}
+
+func TestFindByMarkerRejectsPublishedFeedRowWithoutPostDate(t *testing.T) {
+	t.Parallel()
+
+	server := newRouteServer(t, map[string]routeResponse{
+		"/api/v1/post_management/drafts":    emptyFeed(),
+		"/api/v1/post_management/scheduled": emptyFeed(),
+		"/api/v1/post_management/published": {
+			status: http.StatusOK,
+			body: map[string]any{
+				"posts":    []any{map[string]any{"id": 208706412}},
+				"total":    1,
+				"limit":    100,
+				"offset":   0,
+				"isCapped": false,
+			},
+		},
+	})
+	defer server.Close()
+
+	client := mustClient(t, server, "connect.sid=session")
+	result, err := client.FindByMarker(
+		context.Background(),
+		"gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d",
+	)
+	if err == nil || !strings.Contains(err.Error(), "published feed row") {
+		t.Fatalf("result = %#v, error = %v; want lifecycle-evidence error", result, err)
+	}
+}
+
+func TestFindByMarkerReturnsPublishedPostFromGlobalEnvelope(t *testing.T) {
+	t.Parallel()
+
+	const (
+		marker      = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
+		publishedAt = "2026-07-28T16:05:00Z"
+	)
+	publicationServer := newRouteServer(t, map[string]routeResponse{
+		"/api/v1/post_management/drafts":    emptyFeed(),
+		"/api/v1/post_management/scheduled": emptyFeed(),
+		"/api/v1/post_management/published": {
+			status: http.StatusOK,
+			body: map[string]any{
+				"posts": []any{map[string]any{
+					"id":        208706412,
+					"post_date": publishedAt,
+				}},
+				"total":    1,
+				"limit":    100,
+				"offset":   0,
+				"isCapped": false,
+			},
+		},
+	})
+	defer publicationServer.Close()
+	accountServer := newRouteServer(t, map[string]routeResponse{
+		"/api/v1/posts/by-id/208706412": {
+			status: http.StatusOK,
+			body: map[string]any{
+				"post": map[string]any{
+					"id":        208706412,
+					"body_html": "<p>" + marker + "</p>",
+					"post_date": publishedAt,
+				},
+				"publication": map[string]any{
+					"hostname": strings.TrimPrefix(publicationServer.URL, "http://"),
+				},
+			},
+		},
+	})
+	defer accountServer.Close()
+
+	client, err := substack.NewClient(
+		publicationServer.URL,
+		accountServer.URL,
+		"connect.sid=session",
+		publicationServer.Client(),
+	)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	result, err := client.FindByMarker(context.Background(), marker)
+	if err != nil {
+		t.Fatalf("FindByMarker() error = %v", err)
+	}
+	if !result.Found || result.Post == nil {
+		t.Fatalf("result = %#v, want published post", result)
+	}
+	assertPost(t, *result.Post, "208706412", "published", marker, nil, stringPointer(publishedAt))
+}
+
+func TestFindByMarkerPrefersScheduledEvidenceWhenIDOverlapsDraftFeed(t *testing.T) {
+	t.Parallel()
+
+	const (
+		marker      = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
+		scheduledAt = "2026-07-28T16:00:00Z"
+	)
+	server := newRouteServer(t, map[string]routeResponse{
+		"/api/v1/post_management/drafts": {
+			status: http.StatusOK,
+			body: map[string]any{
+				"posts":    []any{map[string]any{"id": 208706412}},
+				"total":    1,
+				"limit":    100,
+				"offset":   0,
+				"isCapped": false,
+			},
+		},
+		"/api/v1/post_management/scheduled": {
+			status: http.StatusOK,
+			body: map[string]any{
+				"posts": []any{
+					map[string]any{
+						"id":         208706412,
+						"trigger_at": scheduledAt,
+					},
+				},
+				"total":    1,
+				"limit":    100,
+				"offset":   0,
+				"isCapped": false,
+			},
+		},
+		"/api/v1/post_management/published": emptyFeed(),
+		"/api/v1/drafts/208706412": {
+			status: http.StatusOK,
+			body: map[string]any{
+				"id":         208706412,
+				"draft_body": proseMirrorWith(marker),
+			},
+		},
 	})
 	defer server.Close()
 
@@ -216,7 +393,10 @@ func TestFindByMarkerRejectsMultipleDistinctMatches(t *testing.T) {
 					map[string]any{"id": 101},
 					map[string]any{"id": 202},
 				},
-				"total": 2,
+				"total":    2,
+				"limit":    100,
+				"offset":   0,
+				"isCapped": false,
 			},
 		},
 		"/api/v1/drafts/101": {
@@ -248,6 +428,8 @@ func TestFindByMarkerRejectsCappedFeedInsteadOfReturningFalseNotFound(t *testing
 			body: map[string]any{
 				"posts":    []any{},
 				"total":    1000,
+				"limit":    100,
+				"offset":   0,
 				"isCapped": true,
 			},
 		},
@@ -261,6 +443,160 @@ func TestFindByMarkerRejectsCappedFeedInsteadOfReturningFalseNotFound(t *testing
 	)
 	if err == nil || !strings.Contains(err.Error(), "capped") {
 		t.Fatalf("result = %#v, error = %v; want capped-feed error", result, err)
+	}
+}
+
+func TestFindByMarkerRejectsFeedWithMissingPaginationContract(t *testing.T) {
+	t.Parallel()
+
+	server := newRouteServer(t, map[string]routeResponse{
+		"/api/v1/post_management/drafts": {
+			status: http.StatusOK,
+			body:   map[string]any{},
+		},
+	})
+	defer server.Close()
+
+	client := mustClient(t, server, "connect.sid=session")
+	result, err := client.FindByMarker(
+		context.Background(),
+		"gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d",
+	)
+	if err == nil || !strings.Contains(err.Error(), "missing required fields") {
+		t.Fatalf(
+			"result = %#v, error = %v; want missing-pagination error",
+			result,
+			err,
+		)
+	}
+}
+
+func TestFindByMarkerAdvancesByServerReturnedPageLimit(t *testing.T) {
+	t.Parallel()
+
+	const marker = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
+	server := httptest.NewServer(http.HandlerFunc(func(
+		response http.ResponseWriter,
+		request *http.Request,
+	) {
+		switch request.URL.Path {
+		case "/api/v1/post_management/drafts":
+			offset := request.URL.Query().Get("offset")
+			switch offset {
+			case "0":
+				writeJSON(t, response, http.StatusOK, map[string]any{
+					"posts":    []any{map[string]any{"id": 208706411}},
+					"total":    2,
+					"limit":    1,
+					"offset":   0,
+					"isCapped": false,
+				})
+			case "1":
+				writeJSON(t, response, http.StatusOK, map[string]any{
+					"posts":    []any{map[string]any{"id": 208706412}},
+					"total":    2,
+					"limit":    1,
+					"offset":   1,
+					"isCapped": false,
+				})
+			default:
+				t.Fatalf("unexpected draft offset %q", offset)
+			}
+		case "/api/v1/drafts/208706411":
+			writeJSON(t, response, http.StatusOK, map[string]any{
+				"id": 208706411,
+				"draft_body": proseMirrorWith(
+					"gtme-issue:11111111-1111-4111-8111-111111111111",
+				),
+			})
+		case "/api/v1/drafts/208706412":
+			writeJSON(t, response, http.StatusOK, map[string]any{
+				"id":         208706412,
+				"draft_body": proseMirrorWith(marker),
+			})
+		case "/api/v1/post_management/scheduled",
+			"/api/v1/post_management/published":
+			writeJSON(t, response, http.StatusOK, emptyFeed().body)
+		default:
+			t.Fatalf("unexpected request: %s %s", request.Method, request.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := mustClient(t, server, "connect.sid=session")
+	result, err := client.FindByMarker(context.Background(), marker)
+	if err != nil {
+		t.Fatalf("FindByMarker() error = %v", err)
+	}
+	if !result.Found || result.Post == nil || result.Post.PostID != "208706412" {
+		t.Fatalf("result = %#v, want second-page match", result)
+	}
+}
+
+func TestFindByMarkerRejectsCandidateDetailIDMismatch(t *testing.T) {
+	t.Parallel()
+
+	const marker = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
+	server := newRouteServer(t, map[string]routeResponse{
+		"/api/v1/post_management/drafts": {
+			status: http.StatusOK,
+			body: map[string]any{
+				"posts":    []any{map[string]any{"id": 208706412}},
+				"total":    1,
+				"limit":    100,
+				"offset":   0,
+				"isCapped": false,
+			},
+		},
+		"/api/v1/drafts/208706412": {
+			status: http.StatusOK,
+			body: map[string]any{
+				"id":         999999999,
+				"draft_body": proseMirrorWith(marker),
+			},
+		},
+		"/api/v1/post_management/scheduled": emptyFeed(),
+		"/api/v1/post_management/published": emptyFeed(),
+	})
+	defer server.Close()
+
+	client := mustClient(t, server, "connect.sid=session")
+	result, err := client.FindByMarker(context.Background(), marker)
+	if err == nil || !strings.Contains(err.Error(), "does not match candidate id") {
+		t.Fatalf("result = %#v, error = %v; want id-mismatch error", result, err)
+	}
+}
+
+func TestFindByMarkerRejectsCandidateDetailWithoutBody(t *testing.T) {
+	t.Parallel()
+
+	server := newRouteServer(t, map[string]routeResponse{
+		"/api/v1/post_management/drafts": {
+			status: http.StatusOK,
+			body: map[string]any{
+				"posts":    []any{map[string]any{"id": 208706412}},
+				"total":    1,
+				"limit":    100,
+				"offset":   0,
+				"isCapped": false,
+			},
+		},
+		"/api/v1/drafts/208706412": {
+			status: http.StatusOK,
+			body:   map[string]any{"id": 208706412},
+		},
+		"/api/v1/post_management/scheduled": emptyFeed(),
+		"/api/v1/post_management/published": emptyFeed(),
+	})
+	defer server.Close()
+
+	client := mustClient(t, server, "connect.sid=session")
+	result, err := client.FindByMarker(
+		context.Background(),
+		"gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d",
+	)
+	if err == nil || !strings.Contains(err.Error(), "missing body") {
+		t.Fatalf("result = %#v, error = %v; want missing-body error", result, err)
 	}
 }
 
@@ -320,7 +656,10 @@ func TestGetPostUsesScheduledFeedWhenDraftDetailOmitsSchedule(t *testing.T) {
 						"trigger_at": scheduledAt,
 					},
 				},
-				"total": 1,
+				"total":    1,
+				"limit":    100,
+				"offset":   0,
+				"isCapped": false,
 			},
 		},
 	})
@@ -337,6 +676,38 @@ func TestGetPostUsesScheduledFeedWhenDraftDetailOmitsSchedule(t *testing.T) {
 	assertPost(t, *result.Post, "208706412", "scheduled", marker, stringPointer(scheduledAt), nil)
 }
 
+func TestGetPostRejectsMatchingScheduledFeedRowWithoutTriggerAt(t *testing.T) {
+	t.Parallel()
+
+	const marker = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
+	server := newRouteServer(t, map[string]routeResponse{
+		"/api/v1/drafts/208706412": {
+			status: http.StatusOK,
+			body: map[string]any{
+				"id":         208706412,
+				"draft_body": proseMirrorWith(marker),
+			},
+		},
+		"/api/v1/post_management/scheduled": {
+			status: http.StatusOK,
+			body: map[string]any{
+				"posts":    []any{map[string]any{"id": 208706412}},
+				"total":    1,
+				"limit":    100,
+				"offset":   0,
+				"isCapped": false,
+			},
+		},
+	})
+	defer server.Close()
+
+	client := mustClient(t, server, "connect.sid=session")
+	result, err := client.GetPost(context.Background(), "208706412")
+	if err == nil || !strings.Contains(err.Error(), "scheduled feed row") {
+		t.Fatalf("result = %#v, error = %v; want lifecycle-evidence error", result, err)
+	}
+}
+
 func TestGetPostNormalizesPublishedStateByID(t *testing.T) {
 	t.Parallel()
 
@@ -344,24 +715,40 @@ func TestGetPostNormalizesPublishedStateByID(t *testing.T) {
 		marker      = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
 		publishedAt = "2026-07-28T16:05:00Z"
 	)
-	server := newRouteServer(t, map[string]routeResponse{
+	publicationServer := newRouteServer(t, map[string]routeResponse{
 		"/api/v1/drafts/208706412": {
 			status: http.StatusNotFound,
 			body:   map[string]any{"error": "not found"},
 		},
+	})
+	defer publicationServer.Close()
+	accountServer := newRouteServer(t, map[string]routeResponse{
 		"/api/v1/posts/by-id/208706412": {
 			status: http.StatusOK,
 			body: map[string]any{
-				"id":            208706412,
-				"body_html":     "<p>" + marker + "</p>",
-				"post_date":     publishedAt,
-				"canonical_url": "https://publication.example/p/test-post",
+				"post": map[string]any{
+					"id":            208706412,
+					"body_html":     "<p>" + marker + "</p>",
+					"post_date":     publishedAt,
+					"canonical_url": "https://publication.example/p/test-post",
+				},
+				"publication": map[string]any{
+					"hostname": strings.TrimPrefix(publicationServer.URL, "http://"),
+				},
 			},
 		},
 	})
-	defer server.Close()
+	defer accountServer.Close()
 
-	client := mustClient(t, server, "connect.sid=session")
+	client, err := substack.NewClient(
+		publicationServer.URL,
+		accountServer.URL,
+		"connect.sid=session",
+		publicationServer.Client(),
+	)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
 	result, err := client.GetPost(context.Background(), "208706412")
 	if err != nil {
 		t.Fatalf("GetPost() error = %v", err)
@@ -370,6 +757,49 @@ func TestGetPostNormalizesPublishedStateByID(t *testing.T) {
 		t.Fatalf("result = %#v, want found", result)
 	}
 	assertPost(t, *result.Post, "208706412", "published", marker, nil, stringPointer(publishedAt))
+}
+
+func TestGetPostRejectsPublishedPostFromDifferentPublication(t *testing.T) {
+	t.Parallel()
+
+	const marker = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
+	publicationServer := newRouteServer(t, map[string]routeResponse{
+		"/api/v1/drafts/208706412": {
+			status: http.StatusNotFound,
+			body:   map[string]any{"error": "not found"},
+		},
+	})
+	defer publicationServer.Close()
+	accountServer := newRouteServer(t, map[string]routeResponse{
+		"/api/v1/posts/by-id/208706412": {
+			status: http.StatusOK,
+			body: map[string]any{
+				"post": map[string]any{
+					"id":        208706412,
+					"body_html": "<p>" + marker + "</p>",
+					"post_date": "2026-07-28T16:05:00Z",
+				},
+				"publication": map[string]any{
+					"hostname": "other-publication.substack.com",
+				},
+			},
+		},
+	})
+	defer accountServer.Close()
+
+	client, err := substack.NewClient(
+		publicationServer.URL,
+		accountServer.URL,
+		"connect.sid=session",
+		publicationServer.Client(),
+	)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	result, err := client.GetPost(context.Background(), "208706412")
+	if err == nil || !strings.Contains(err.Error(), "publication hostname") {
+		t.Fatalf("result = %#v, error = %v; want publication mismatch", result, err)
+	}
 }
 
 func TestGetPostReturnsAuthoritativeNotFoundOnlyAfterBoth404(t *testing.T) {
@@ -424,6 +854,31 @@ func TestGetPostDoesNotNormalizePermissionFailureAsMissingOrLeakCookie(t *testin
 	assertSecretAbsent(t, err, cookie)
 }
 
+func TestGetPostRejectsTrailingJSON(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(
+		response http.ResponseWriter,
+		_ *http.Request,
+	) {
+		response.Header().Set("Content-Type", "application/json")
+		response.WriteHeader(http.StatusOK)
+		if _, err := io.WriteString(
+			response,
+			`{"id":208706412,"draft_body":"body"}{"unexpected":true}`,
+		); err != nil {
+			t.Fatalf("write response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	client := mustClient(t, server, "connect.sid=session")
+	result, err := client.GetPost(context.Background(), "208706412")
+	if err == nil || !strings.Contains(err.Error(), "trailing JSON") {
+		t.Fatalf("result = %#v, error = %v; want trailing-JSON error", result, err)
+	}
+}
+
 func decodeJSON(t *testing.T, reader io.Reader, target any) {
 	t.Helper()
 	if err := json.NewDecoder(reader).Decode(target); err != nil {
@@ -470,10 +925,11 @@ func emptyFeed() routeResponse {
 	return routeResponse{
 		status: http.StatusOK,
 		body: map[string]any{
-			"posts":  []any{},
-			"total":  0,
-			"limit":  100,
-			"offset": 0,
+			"posts":    []any{},
+			"total":    0,
+			"limit":    100,
+			"offset":   0,
+			"isCapped": false,
 		},
 	}
 }

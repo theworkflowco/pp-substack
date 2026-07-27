@@ -73,6 +73,7 @@ func newVersionCommand(options Options) *cobra.Command {
 		Use:     "version",
 		Short:   "Print the pp-substack version",
 		Example: "  pp-substack version --json",
+		Args:    cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			if !asJSON {
 				return usageError("--json is required")
@@ -95,6 +96,7 @@ func newDraftCreateCommand(options Options) *cobra.Command {
 	command := &cobra.Command{
 		Use:   "create",
 		Short: "Create a newsletter draft without scheduling or sending it",
+		Args:  cobra.NoArgs,
 		Example: "  pp-substack drafts create --publication gtmengineersearch " +
 			"--title \"GTM jobs this week\" --markdown-file ./issue.md " +
 			"--correlation-marker gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d --json",
@@ -110,6 +112,9 @@ func newDraftCreateCommand(options Options) *cobra.Command {
 			}
 			if strings.TrimSpace(correlationMarker) == "" {
 				return requiredFlag("correlation-marker")
+			}
+			if err := substack.ValidateCorrelationMarker(correlationMarker); err != nil {
+				return usageError(err.Error())
 			}
 			service, err := authenticatedService(options, publication)
 			if err != nil {
@@ -156,6 +161,7 @@ func newDraftFindCommand(options Options) *cobra.Command {
 	command := &cobra.Command{
 		Use:   "find",
 		Short: "Find exactly one post by its reconciliation marker",
+		Args:  cobra.NoArgs,
 		Example: "  pp-substack drafts find --publication gtmengineersearch " +
 			"--correlation-marker gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d --json",
 		RunE: func(command *cobra.Command, _ []string) error {
@@ -164,6 +170,9 @@ func newDraftFindCommand(options Options) *cobra.Command {
 			}
 			if strings.TrimSpace(correlationMarker) == "" {
 				return requiredFlag("correlation-marker")
+			}
+			if err := substack.ValidateCorrelationMarker(correlationMarker); err != nil {
+				return usageError(err.Error())
 			}
 			service, err := authenticatedService(options, publication)
 			if err != nil {
@@ -195,6 +204,7 @@ func newPostGetCommand(options Options) *cobra.Command {
 		Use:     "get",
 		Short:   "Get strict draft, scheduled, or published lifecycle state",
 		Example: "  pp-substack posts get --publication gtmengineersearch --post-id 208706412 --json",
+		Args:    cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			if err := validateJSONAndPublication(asJSON, publication); err != nil {
 				return err

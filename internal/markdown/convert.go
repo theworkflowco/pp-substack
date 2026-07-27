@@ -3,6 +3,7 @@ package markdown
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/url"
 	"strings"
 )
@@ -48,6 +49,12 @@ func ToProseMirror(source string, correlationMarker string) (string, error) {
 			continue
 		}
 
+		if line == "---" {
+			content = append(content, node{Type: "horizontal_rule"})
+			index++
+			continue
+		}
+
 		if strings.HasPrefix(line, "- ") {
 			items := make([]node, 0)
 			for index < len(lines) {
@@ -80,7 +87,9 @@ func ToProseMirror(source string, correlationMarker string) (string, error) {
 			if next == "" {
 				break
 			}
-			if _, _, ok := heading(next); ok || strings.HasPrefix(next, "- ") {
+			if _, _, ok := heading(next); ok ||
+				strings.HasPrefix(next, "- ") ||
+				next == "---" {
 				break
 			}
 			paragraphLines = append(paragraphLines, next)
@@ -108,7 +117,7 @@ func ToProseMirror(source string, correlationMarker string) (string, error) {
 }
 
 func heading(line string) (int, string, bool) {
-	for level := 1; level <= 3; level++ {
+	for level := 1; level <= 6; level++ {
 		prefix := strings.Repeat("#", level) + " "
 		if strings.HasPrefix(line, prefix) {
 			return level, strings.TrimPrefix(line, prefix), true
@@ -122,7 +131,7 @@ func parseInline(text string) ([]node, error) {
 	for len(text) > 0 {
 		switch {
 		case strings.HasPrefix(text, "**"):
-			end := strings.Index(text[2:], "**")
+			end := indexUnescaped(text[2:], "**")
 			if end < 0 {
 				return nil, fmt.Errorf("unclosed strong emphasis in Markdown")
 			}
@@ -132,6 +141,17 @@ func parseInline(text string) ([]node, error) {
 				Marks: []mark{{Type: "strong"}},
 			})
 			text = text[2+end+2:]
+		case strings.HasPrefix(text, "_"):
+			end := indexUnescaped(text[1:], "_")
+			if end < 0 {
+				return nil, fmt.Errorf("unclosed emphasis in Markdown")
+			}
+			nodes = append(nodes, node{
+				Type:  "text",
+				Text:  unescape(text[1 : 1+end]),
+				Marks: []mark{{Type: "em"}},
+			})
+			text = text[1+end+1:]
 		case strings.HasPrefix(text, "["):
 			labelEnd := strings.Index(text, "](")
 			if labelEnd < 0 {
@@ -144,6 +164,9 @@ func parseInline(text string) ([]node, error) {
 				return nil, fmt.Errorf("unclosed Markdown link")
 			}
 			target := text[labelEnd+2 : labelEnd+2+targetEnd]
+			if strings.HasPrefix(target, "<") && strings.HasSuffix(target, ">") {
+				target = strings.TrimSuffix(strings.TrimPrefix(target, "<"), ">")
+			}
 			parsed, err := url.Parse(target)
 			if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
 				return nil, fmt.Errorf("Markdown link must use an absolute HTTP(S) URL")
@@ -169,14 +192,51 @@ func parseInline(text string) ([]node, error) {
 func nextInlineStart(text string) int {
 	next := len(text)
 	for _, token := range []string{"**", "["} {
-		if index := strings.Index(text[1:], token); index >= 0 && index+1 < next {
+		if index := indexUnescaped(text[1:], token); index >= 0 && index+1 < next {
 			next = index + 1
 		}
+	}
+	if index := emphasisStart(text[1:]); index >= 0 && index+1 < next {
+		next = index + 1
 	}
 	if next == 0 {
 		return 1
 	}
 	return next
+}
+
+func emphasisStart(text string) int {
+	for offset := 0; offset < len(text); {
+		index := indexUnescaped(text[offset:], "_")
+		if index < 0 {
+			return -1
+		}
+		index += offset
+		if indexUnescaped(text[index+1:], "_") >= 0 {
+			return index
+		}
+		offset = index + 1
+	}
+	return -1
+}
+
+func indexUnescaped(text string, token string) int {
+	for offset := 0; offset <= len(text)-len(token); {
+		index := strings.Index(text[offset:], token)
+		if index < 0 {
+			return -1
+		}
+		index += offset
+		backslashes := 0
+		for position := index - 1; position >= 0 && text[position] == '\\'; position-- {
+			backslashes++
+		}
+		if backslashes%2 == 0 {
+			return index
+		}
+		offset = index + len(token)
+	}
+	return -1
 }
 
 func appendText(nodes []node, text string) []node {
@@ -205,5 +265,5 @@ func unescape(text string) string {
 	if escaped {
 		builder.WriteByte('\\')
 	}
-	return builder.String()
+	return html.UnescapeString(builder.String())
 }

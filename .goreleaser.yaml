@@ -23,6 +23,7 @@ builds:
       - -trimpath
     ldflags:
       - -s -w -buildid= -X main.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
 
 archives:
   - id: release
@@ -31,6 +32,18 @@ archives:
     formats:
       - tar.gz
     name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    builds_info:
+      mode: 0755
+      mtime: 2000-01-01T00:00:00Z
+    files:
+      - src: LICENSE
+        info:
+          mode: 0644
+          mtime: 2000-01-01T00:00:00Z
+      - src: README.md
+        info:
+          mode: 0644
+          mtime: 2000-01-01T00:00:00Z
 
 checksum:
   name_template: checksums.txt
@@ -38,4 +51,3 @@ checksum:
 
 changelog:
   use: github
-

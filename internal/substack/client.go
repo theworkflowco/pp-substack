@@ -33,6 +33,7 @@ func (err *HTTPError) Error() string {
 
 type Client struct {
 	publicationBaseURL string
+	publicationHost    string
 	accountBaseURL     string
 	cookie             string
 	httpClient         *http.Client
@@ -60,6 +61,7 @@ func NewClient(
 	}
 	return &Client{
 		publicationBaseURL: strings.TrimRight(publication.String(), "/"),
+		publicationHost:    publication.Host,
 		accountBaseURL:     strings.TrimRight(account.String(), "/"),
 		cookie:             cookie,
 		httpClient:         httpClient,
@@ -72,6 +74,9 @@ func (client *Client) CreateDraft(
 	proseMirrorBody string,
 	correlationMarker string,
 ) (Draft, error) {
+	if err := ValidateCorrelationMarker(correlationMarker); err != nil {
+		return Draft{}, err
+	}
 	var profile struct {
 		ID json.Number `json:"id"`
 	}
@@ -174,6 +179,13 @@ func (client *Client) requestJSON(
 	decoder.UseNumber()
 	if err := decoder.Decode(target); err != nil {
 		return fmt.Errorf("decode JSON from %s: %w", safePath(endpoint), err)
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("decode JSON from %s: trailing JSON value", safePath(endpoint))
+		}
+		return fmt.Errorf("decode JSON from %s: trailing JSON data: %w", safePath(endpoint), err)
 	}
 	return nil
 }

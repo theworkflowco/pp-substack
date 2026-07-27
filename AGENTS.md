@@ -11,10 +11,12 @@ Safety rules:
   `PP_SUBSTACK_SESSION_COOKIE`.
 - Never print, persist, fixture, record, or include session material in an
   error.
-- Treat only confirmed HTTP 404 responses as absence. Authentication,
+- For `drafts find`, absence is authoritative only after a complete,
+  uncapped scan of the draft, scheduled, and published feeds finds no exact
+  marker. For `posts get`, absence is authoritative only after both the draft
+  and global published-post endpoints return HTTP 404. Authentication,
   authorization, transport, rate-limit, parse, incomplete-feed, and ambiguity
   failures must remain errors.
 - Write a failing test before changing behavior.
 - Run `go test -race ./...`, `go vet ./...`, `govulncheck ./...`, and both
   required cross-builds before release.
-

@@ -173,6 +173,49 @@ func TestDraftsFindNotFoundOmitsPost(t *testing.T) {
 	}
 }
 
+func TestDraftsFindFoundEmitsNormalizedPost(t *testing.T) {
+	t.Parallel()
+
+	const marker = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
+	fake := &fakeService{
+		findResult: substack.Found{
+			Found: true,
+			Post: &substack.Post{
+				PostID:            "208706412",
+				PostURL:           "https://gtmengineersearch.substack.com/publish/post/208706412",
+				Status:            "draft",
+				CorrelationMarker: marker,
+			},
+		},
+	}
+	output, err := execute(
+		t,
+		authenticatedOptions(fake),
+		"drafts",
+		"find",
+		"--publication",
+		"gtmengineersearch",
+		"--correlation-marker",
+		marker,
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	assertJSONEqual(
+		t,
+		output,
+		`{"found":true,"post":{
+			"post_id":"208706412",
+			"post_url":"https://gtmengineersearch.substack.com/publish/post/208706412",
+			"status":"draft",
+			"scheduled_at":null,
+			"published_at":null,
+			"correlation_marker":"`+marker+`"
+		}}`,
+	)
+}
+
 func TestPostsGetReturnsFoundEnvelope(t *testing.T) {
 	t.Parallel()
 
@@ -221,6 +264,119 @@ func TestPostsGetReturnsFoundEnvelope(t *testing.T) {
 	)
 }
 
+func TestPostsGetEmitsScheduledPublishedAndDeletedStates(t *testing.T) {
+	t.Parallel()
+
+	const (
+		marker      = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
+		scheduledAt = "2026-07-28T16:00:00Z"
+		publishedAt = "2026-07-28T16:05:00Z"
+	)
+	tests := []struct {
+		name     string
+		result   substack.Found
+		expected string
+	}{
+		{
+			name: "scheduled",
+			result: substack.Found{Found: true, Post: &substack.Post{
+				PostID:            "208706412",
+				PostURL:           "https://gtmengineersearch.substack.com/publish/post/208706412",
+				Status:            "scheduled",
+				ScheduledAt:       stringPointer(scheduledAt),
+				CorrelationMarker: marker,
+			}},
+			expected: `{"found":true,"post":{
+				"post_id":"208706412",
+				"post_url":"https://gtmengineersearch.substack.com/publish/post/208706412",
+				"status":"scheduled",
+				"scheduled_at":"` + scheduledAt + `",
+				"published_at":null,
+				"correlation_marker":"` + marker + `"
+			}}`,
+		},
+		{
+			name: "published",
+			result: substack.Found{Found: true, Post: &substack.Post{
+				PostID:            "208706412",
+				PostURL:           "https://gtmengineersearch.substack.com/publish/post/208706412",
+				Status:            "published",
+				ScheduledAt:       stringPointer(scheduledAt),
+				PublishedAt:       stringPointer(publishedAt),
+				CorrelationMarker: marker,
+			}},
+			expected: `{"found":true,"post":{
+				"post_id":"208706412",
+				"post_url":"https://gtmengineersearch.substack.com/publish/post/208706412",
+				"status":"published",
+				"scheduled_at":"` + scheduledAt + `",
+				"published_at":"` + publishedAt + `",
+				"correlation_marker":"` + marker + `"
+			}}`,
+		},
+		{
+			name:     "deleted",
+			result:   substack.Found{Found: false},
+			expected: `{"found":false}`,
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			output, err := execute(
+				t,
+				authenticatedOptions(&fakeService{getResult: test.result}),
+				"posts",
+				"get",
+				"--publication",
+				"gtmengineersearch",
+				"--post-id",
+				"208706412",
+				"--json",
+			)
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			assertJSONEqual(t, output, test.expected)
+		})
+	}
+}
+
+func TestCommandFailureDoesNotLeakCookie(t *testing.T) {
+	t.Parallel()
+
+	const cookie = "connect.sid=command-boundary-secret"
+	fake := &fakeService{
+		findError: &substack.HTTPError{
+			StatusCode: 403,
+			Path:       "/api/v1/post_management/drafts",
+		},
+	}
+	options := authenticatedOptions(fake)
+	options.LookupEnv = func(string) (string, bool) { return cookie, true }
+	output, err := execute(
+		t,
+		options,
+		"drafts",
+		"find",
+		"--publication",
+		"gtmengineersearch",
+		"--correlation-marker",
+		"gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d",
+		"--json",
+	)
+	if err == nil {
+		t.Fatal("Execute() error = nil, want permission failure")
+	}
+	if strings.Contains(output, cookie) || strings.Contains(err.Error(), cookie) {
+		t.Fatalf("command failure leaked cookie: output=%q error=%v", output, err)
+	}
+	if cli.ExitCode(err) != 3 {
+		t.Fatalf("ExitCode() = %d, want auth exit 3", cli.ExitCode(err))
+	}
+}
+
 func TestAuthenticatedCommandsFailBeforeServiceWhenCookieMissing(t *testing.T) {
 	t.Parallel()
 
@@ -251,6 +407,42 @@ func TestAuthenticatedCommandsFailBeforeServiceWhenCookieMissing(t *testing.T) {
 	}
 }
 
+func TestDraftsCreateRejectsMarkerThatFindCannotReconcile(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	_, err := execute(
+		t,
+		cli.Options{
+			Version: "0.1.0",
+			LookupEnv: func(string) (string, bool) {
+				return "connect.sid=session", true
+			},
+			NewService: func(string, string) (cli.Service, error) {
+				called = true
+				return &fakeService{}, nil
+			},
+		},
+		"drafts",
+		"create",
+		"--publication",
+		"gtmengineersearch",
+		"--title",
+		"GTM jobs",
+		"--markdown-file",
+		"/private/tmp/issue.md",
+		"--correlation-marker",
+		"arbitrary-marker",
+		"--json",
+	)
+	if err == nil || !strings.Contains(err.Error(), "gtme-issue:<uuid>") {
+		t.Fatalf("error = %v, want marker-format error", err)
+	}
+	if called {
+		t.Fatal("service was called with an unreconcilable marker")
+	}
+}
+
 func TestAutomationCommandsRequireJSONFlag(t *testing.T) {
 	t.Parallel()
 
@@ -269,6 +461,22 @@ func TestAutomationCommandsRequireJSONFlag(t *testing.T) {
 	}
 	if cli.ExitCode(err) != 2 {
 		t.Fatalf("ExitCode() = %d, want usage exit 2", cli.ExitCode(err))
+	}
+}
+
+func TestLeafCommandsRejectPositionalArguments(t *testing.T) {
+	t.Parallel()
+
+	_, err := execute(
+		t,
+		cli.Options{Version: "0.1.0"},
+		"version",
+		"--json",
+		"ignored",
+	)
+	if err == nil || !strings.Contains(err.Error(), "unknown command") &&
+		!strings.Contains(err.Error(), "arg") {
+		t.Fatalf("error = %v, want positional-argument rejection", err)
 	}
 }
 
@@ -308,7 +516,9 @@ type fakeService struct {
 	createTitle  string
 	createBody   string
 	findResult   substack.Found
+	findError    error
 	getResult    substack.Found
+	getError     error
 }
 
 func (fake *fakeService) CreateDraft(
@@ -326,14 +536,14 @@ func (fake *fakeService) FindByMarker(
 	_ context.Context,
 	_ string,
 ) (substack.Found, error) {
-	return fake.findResult, nil
+	return fake.findResult, fake.findError
 }
 
 func (fake *fakeService) GetPost(
 	_ context.Context,
 	_ string,
 ) (substack.Found, error) {
-	return fake.getResult, nil
+	return fake.getResult, fake.getError
 }
 
 func authenticatedOptions(service cli.Service) cli.Options {
@@ -349,6 +559,10 @@ func authenticatedOptions(service cli.Service) cli.Options {
 			return service, nil
 		},
 	}
+}
+
+func stringPointer(value string) *string {
+	return &value
 }
 
 func execute(t *testing.T, options cli.Options, args ...string) (string, error) {
