@@ -14,7 +14,8 @@ import (
 	"time"
 )
 
-const feedPageSize = 100
+// Substack's private management feeds reject limits above the browser's value.
+const feedPageSize = 10
 
 var correlationMarkerPattern = regexp.MustCompile(
 	`gtme-issue:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`,

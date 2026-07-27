@@ -481,6 +481,12 @@ func TestFindByMarkerAdvancesByServerReturnedPageLimit(t *testing.T) {
 	) {
 		switch request.URL.Path {
 		case "/api/v1/post_management/drafts":
+			if request.URL.Query().Get("limit") != "10" {
+				t.Fatalf(
+					"draft limit = %q, want browser-observed maximum 10",
+					request.URL.Query().Get("limit"),
+				)
+			}
 			offset := request.URL.Query().Get("offset")
 			switch offset {
 			case "0":
