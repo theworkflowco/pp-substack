@@ -1,0 +1,209 @@
+package markdown
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/url"
+	"strings"
+)
+
+type node struct {
+	Type    string         `json:"type"`
+	Attrs   map[string]any `json:"attrs,omitempty"`
+	Content []node         `json:"content,omitempty"`
+	Text    string         `json:"text,omitempty"`
+	Marks   []mark         `json:"marks,omitempty"`
+}
+
+type mark struct {
+	Type  string         `json:"type"`
+	Attrs map[string]any `json:"attrs,omitempty"`
+}
+
+func ToProseMirror(source string, correlationMarker string) (string, error) {
+	if strings.Count(source, correlationMarker) != 1 {
+		return "", fmt.Errorf("correlation marker must appear exactly once in Markdown")
+	}
+
+	lines := strings.Split(strings.ReplaceAll(source, "\r\n", "\n"), "\n")
+	content := make([]node, 0, len(lines))
+	for index := 0; index < len(lines); {
+		line := strings.TrimSpace(lines[index])
+		if line == "" {
+			index++
+			continue
+		}
+
+		if level, text, ok := heading(line); ok {
+			inline, err := parseInline(text)
+			if err != nil {
+				return "", err
+			}
+			content = append(content, node{
+				Type:    "heading",
+				Attrs:   map[string]any{"level": level},
+				Content: inline,
+			})
+			index++
+			continue
+		}
+
+		if strings.HasPrefix(line, "- ") {
+			items := make([]node, 0)
+			for index < len(lines) {
+				itemLine := strings.TrimSpace(lines[index])
+				if !strings.HasPrefix(itemLine, "- ") {
+					break
+				}
+				inline, err := parseInline(strings.TrimPrefix(itemLine, "- "))
+				if err != nil {
+					return "", err
+				}
+				items = append(items, node{
+					Type: "list_item",
+					Content: []node{{
+						Type:    "paragraph",
+						Attrs:   map[string]any{"textAlign": nil},
+						Content: inline,
+					}},
+				})
+				index++
+			}
+			content = append(content, node{Type: "bullet_list", Content: items})
+			continue
+		}
+
+		paragraphLines := []string{line}
+		index++
+		for index < len(lines) {
+			next := strings.TrimSpace(lines[index])
+			if next == "" {
+				break
+			}
+			if _, _, ok := heading(next); ok || strings.HasPrefix(next, "- ") {
+				break
+			}
+			paragraphLines = append(paragraphLines, next)
+			index++
+		}
+		inline, err := parseInline(strings.Join(paragraphLines, " "))
+		if err != nil {
+			return "", err
+		}
+		content = append(content, node{
+			Type:    "paragraph",
+			Attrs:   map[string]any{"textAlign": nil},
+			Content: inline,
+		})
+	}
+
+	encoded, err := json.Marshal(node{Type: "doc", Content: content})
+	if err != nil {
+		return "", fmt.Errorf("encode ProseMirror document: %w", err)
+	}
+	if strings.Count(string(encoded), correlationMarker) != 1 {
+		return "", fmt.Errorf("correlation marker must survive conversion exactly once")
+	}
+	return string(encoded), nil
+}
+
+func heading(line string) (int, string, bool) {
+	for level := 1; level <= 3; level++ {
+		prefix := strings.Repeat("#", level) + " "
+		if strings.HasPrefix(line, prefix) {
+			return level, strings.TrimPrefix(line, prefix), true
+		}
+	}
+	return 0, "", false
+}
+
+func parseInline(text string) ([]node, error) {
+	nodes := make([]node, 0)
+	for len(text) > 0 {
+		switch {
+		case strings.HasPrefix(text, "**"):
+			end := strings.Index(text[2:], "**")
+			if end < 0 {
+				return nil, fmt.Errorf("unclosed strong emphasis in Markdown")
+			}
+			nodes = append(nodes, node{
+				Type:  "text",
+				Text:  unescape(text[2 : 2+end]),
+				Marks: []mark{{Type: "strong"}},
+			})
+			text = text[2+end+2:]
+		case strings.HasPrefix(text, "["):
+			labelEnd := strings.Index(text, "](")
+			if labelEnd < 0 {
+				nodes = appendText(nodes, unescape(text[:1]))
+				text = text[1:]
+				continue
+			}
+			targetEnd := strings.Index(text[labelEnd+2:], ")")
+			if targetEnd < 0 {
+				return nil, fmt.Errorf("unclosed Markdown link")
+			}
+			target := text[labelEnd+2 : labelEnd+2+targetEnd]
+			parsed, err := url.Parse(target)
+			if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
+				return nil, fmt.Errorf("Markdown link must use an absolute HTTP(S) URL")
+			}
+			nodes = append(nodes, node{
+				Type: "text",
+				Text: unescape(text[1:labelEnd]),
+				Marks: []mark{{
+					Type:  "link",
+					Attrs: map[string]any{"href": target},
+				}},
+			})
+			text = text[labelEnd+2+targetEnd+1:]
+		default:
+			next := nextInlineStart(text)
+			nodes = appendText(nodes, unescape(text[:next]))
+			text = text[next:]
+		}
+	}
+	return nodes, nil
+}
+
+func nextInlineStart(text string) int {
+	next := len(text)
+	for _, token := range []string{"**", "["} {
+		if index := strings.Index(text[1:], token); index >= 0 && index+1 < next {
+			next = index + 1
+		}
+	}
+	if next == 0 {
+		return 1
+	}
+	return next
+}
+
+func appendText(nodes []node, text string) []node {
+	if text == "" {
+		return nodes
+	}
+	return append(nodes, node{Type: "text", Text: text})
+}
+
+func unescape(text string) string {
+	var builder strings.Builder
+	builder.Grow(len(text))
+	escaped := false
+	for _, character := range text {
+		if escaped {
+			builder.WriteRune(character)
+			escaped = false
+			continue
+		}
+		if character == '\\' {
+			escaped = true
+			continue
+		}
+		builder.WriteRune(character)
+	}
+	if escaped {
+		builder.WriteByte('\\')
+	}
+	return builder.String()
+}
