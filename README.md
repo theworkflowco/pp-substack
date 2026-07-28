@@ -1,7 +1,8 @@
 # pp-substack
 
 `pp-substack` creates Substack newsletter drafts and reads their lifecycle
-state for reconciliation. It never edits, schedules, publishes, sends, or
+state for reconciliation. A safe draft-only update command is approved but
+not yet released or usable. The CLI never schedules, publishes, sends, or
 manages subscribers.
 
 Substack does not publish a supported API for these writer workflows. This
@@ -52,8 +53,15 @@ pp-substack drafts create --publication <slug> --title <title> \
   --markdown-file <path> --correlation-marker <marker> --json
 pp-substack drafts find --publication <slug> \
   --correlation-marker <marker> --json
+pp-substack drafts update --publication <slug> --post-id <id> --title <title> --markdown-file <path> --correlation-marker <marker> --json
 pp-substack posts get --publication <slug> --post-id <id> --json
 ```
+
+The `drafts update` shape is reserved by this contract; the command is not
+released or usable yet. It may change only the title and body of an existing
+draft. It must read lifecycle state immediately before mutation and refuse
+scheduled or published posts. No scheduling, publishing, sending, subscriber,
+Notes, analytics, or browser-login commands are approved.
 
 Every automation command requires `--json`. `drafts find` and `posts get`
 return `{"found":false}` when absence is authoritative; the `post` key is
