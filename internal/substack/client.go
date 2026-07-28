@@ -22,6 +22,25 @@ type Draft struct {
 	CorrelationMarker string `json:"correlation_marker"`
 }
 
+type UpdatedDraft struct {
+	PostID            string `json:"post_id"`
+	DraftURL          string `json:"draft_url"`
+	Status            string `json:"status"`
+	CorrelationMarker string `json:"correlation_marker"`
+}
+
+type draftLifecycle struct {
+	IsPublished   *bool              `json:"is_published"`
+	PostDate      json.RawMessage    `json:"post_date"`
+	EmailSentAt   json.RawMessage    `json:"email_sent_at"`
+	PostSchedules *[]json.RawMessage `json:"postSchedules"`
+}
+
+type draftByline struct {
+	ID      json.Number `json:"id"`
+	IsGuest *bool       `json:"is_guest"`
+}
+
 type HTTPError struct {
 	StatusCode int
 	Path       string
@@ -138,6 +157,257 @@ func (client *Client) CreateDraft(
 		Status:            "draft",
 		CorrelationMarker: correlationMarker,
 	}, nil
+}
+
+func (client *Client) UpdateDraft(
+	ctx context.Context,
+	postID string,
+	title string,
+	proseMirrorBody string,
+	correlationMarker string,
+) (UpdatedDraft, error) {
+	if strings.TrimSpace(postID) == "" {
+		return UpdatedDraft{}, fmt.Errorf("post id is required")
+	}
+	if strings.TrimSpace(title) == "" {
+		return UpdatedDraft{}, fmt.Errorf("title is required")
+	}
+	if err := ValidateCorrelationMarker(correlationMarker); err != nil {
+		return UpdatedDraft{}, err
+	}
+	if strings.Count(proseMirrorBody, correlationMarker) != 1 {
+		return UpdatedDraft{}, fmt.Errorf(
+			"prose mirror body must contain correlation marker exactly once",
+		)
+	}
+
+	found, err := client.GetPost(ctx, postID)
+	if err != nil {
+		return UpdatedDraft{}, fmt.Errorf("update Substack draft: %w", err)
+	}
+	if !found.Found || found.Post == nil {
+		return UpdatedDraft{}, fmt.Errorf(
+			"update Substack draft: post %q was not found",
+			postID,
+		)
+	}
+	if found.Post.Status != "draft" {
+		return UpdatedDraft{}, fmt.Errorf(
+			"update Substack draft: post %q has status %q, want draft",
+			postID,
+			found.Post.Status,
+		)
+	}
+	if found.Post.CorrelationMarker != correlationMarker {
+		return UpdatedDraft{}, fmt.Errorf(
+			"update Substack draft: post %q correlation marker does not match",
+			postID,
+		)
+	}
+
+	endpoint := client.publicationBaseURL + "/api/v1/drafts/" +
+		url.PathEscape(postID)
+	var current struct {
+		draftLifecycle
+		ID             json.RawMessage `json:"id"`
+		DraftBody      *string         `json:"draft_body"`
+		DraftUpdatedAt *string         `json:"draft_updated_at"`
+		DraftBylines   *[]draftByline  `json:"draftBylines"`
+	}
+	if err := client.requestJSON(
+		ctx,
+		http.MethodGet,
+		endpoint,
+		nil,
+		&current,
+	); err != nil {
+		return UpdatedDraft{}, fmt.Errorf(
+			"update Substack draft: refresh draft before mutation: %w",
+			err,
+		)
+	}
+	currentID, err := parseID(current.ID)
+	if err != nil {
+		return UpdatedDraft{}, fmt.Errorf(
+			"update Substack draft: refreshed response %w",
+			err,
+		)
+	}
+	if currentID != postID {
+		return UpdatedDraft{}, fmt.Errorf(
+			"update Substack draft: refreshed response id %q does not match requested id %q",
+			currentID,
+			postID,
+		)
+	}
+	if err := validateDraftLifecycle(
+		"update Substack draft: refreshed response",
+		current.draftLifecycle,
+	); err != nil {
+		return UpdatedDraft{}, err
+	}
+	if current.DraftUpdatedAt == nil ||
+		strings.TrimSpace(*current.DraftUpdatedAt) == "" {
+		return UpdatedDraft{}, fmt.Errorf(
+			"update Substack draft: refreshed response is missing draft_updated_at",
+		)
+	}
+	if err := validateRFC3339(
+		*current.DraftUpdatedAt,
+		"draft_updated_at",
+	); err != nil {
+		return UpdatedDraft{}, fmt.Errorf(
+			"update Substack draft: refreshed response %w",
+			err,
+		)
+	}
+	if current.DraftBody == nil {
+		return UpdatedDraft{}, fmt.Errorf(
+			"update Substack draft: refreshed response is missing draft_body needed to verify correlation marker",
+		)
+	}
+	if strings.Count(*current.DraftBody, correlationMarker) != 1 {
+		return UpdatedDraft{}, fmt.Errorf(
+			"update Substack draft: refreshed response correlation marker is not present exactly once",
+		)
+	}
+	if current.DraftBylines == nil || len(*current.DraftBylines) == 0 {
+		return UpdatedDraft{}, fmt.Errorf(
+			"update Substack draft: refreshed response has no draft bylines",
+		)
+	}
+
+	type updateByline struct {
+		ID      json.Number `json:"id"`
+		IsGuest bool        `json:"is_guest"`
+	}
+	bylines := make([]updateByline, len(*current.DraftBylines))
+	for index, byline := range *current.DraftBylines {
+		if byline.ID == "" {
+			return UpdatedDraft{}, fmt.Errorf(
+				"update Substack draft: refreshed response draft byline %d is missing id",
+				index,
+			)
+		}
+		if _, err := strconv.ParseUint(byline.ID.String(), 10, 64); err != nil {
+			return UpdatedDraft{}, fmt.Errorf(
+				"update Substack draft: refreshed response draft byline %d has invalid id: %w",
+				index,
+				err,
+			)
+		}
+		if byline.IsGuest == nil {
+			return UpdatedDraft{}, fmt.Errorf(
+				"update Substack draft: refreshed response draft byline %d is missing is_guest",
+				index,
+			)
+		}
+		bylines[index] = updateByline{
+			ID:      byline.ID,
+			IsGuest: *byline.IsGuest,
+		}
+	}
+
+	payload := struct {
+		DetectLanguage       bool           `json:"detect_language"`
+		DraftBody            string         `json:"draft_body"`
+		DraftBylines         []updateByline `json:"draft_bylines"`
+		DraftPodcastDuration *string        `json:"draft_podcast_duration"`
+		DraftPodcastURL      *string        `json:"draft_podcast_url"`
+		DraftSectionID       *string        `json:"draft_section_id"`
+		DraftSubtitle        string         `json:"draft_subtitle"`
+		DraftTitle           string         `json:"draft_title"`
+		LastUpdatedAt        string         `json:"last_updated_at"`
+		SectionChosen        bool           `json:"section_chosen"`
+		Translations         []struct{}     `json:"translations"`
+	}{
+		DetectLanguage: true,
+		DraftBody:      proseMirrorBody,
+		DraftBylines:   bylines,
+		DraftSubtitle:  "",
+		DraftTitle:     title,
+		LastUpdatedAt:  *current.DraftUpdatedAt,
+		SectionChosen:  false,
+		Translations:   []struct{}{},
+	}
+	var response struct {
+		draftLifecycle
+		ID        json.RawMessage `json:"id"`
+		DraftBody *string         `json:"draft_body"`
+	}
+	if err := client.requestJSON(
+		ctx,
+		http.MethodPut,
+		endpoint,
+		payload,
+		&response,
+	); err != nil {
+		return UpdatedDraft{}, fmt.Errorf("update Substack draft: %w", err)
+	}
+	responseID, err := parseID(response.ID)
+	if err != nil {
+		return UpdatedDraft{}, fmt.Errorf(
+			"update Substack draft response: %w",
+			err,
+		)
+	}
+	if responseID != postID {
+		return UpdatedDraft{}, fmt.Errorf(
+			"update Substack draft response id %q does not match requested id %q",
+			responseID,
+			postID,
+		)
+	}
+	if err := validateDraftLifecycle(
+		"update Substack draft response",
+		response.draftLifecycle,
+	); err != nil {
+		return UpdatedDraft{}, err
+	}
+	if response.DraftBody == nil {
+		return UpdatedDraft{}, fmt.Errorf(
+			"update Substack draft response is missing draft_body",
+		)
+	}
+	if strings.Count(*response.DraftBody, correlationMarker) != 1 {
+		return UpdatedDraft{}, fmt.Errorf(
+			"update Substack draft response: correlation marker did not round-trip exactly once",
+		)
+	}
+
+	return UpdatedDraft{
+		PostID: responseID,
+		DraftURL: client.publicationBaseURL + "/publish/post/" +
+			url.PathEscape(responseID),
+		Status:            "draft",
+		CorrelationMarker: correlationMarker,
+	}, nil
+}
+
+func validateDraftLifecycle(context string, lifecycle draftLifecycle) error {
+	if lifecycle.IsPublished == nil {
+		return fmt.Errorf("%s is missing is_published", context)
+	}
+	if len(lifecycle.PostDate) == 0 {
+		return fmt.Errorf("%s is missing post_date", context)
+	}
+	if len(lifecycle.EmailSentAt) == 0 {
+		return fmt.Errorf("%s is missing email_sent_at", context)
+	}
+	if lifecycle.PostSchedules == nil {
+		return fmt.Errorf("%s is missing postSchedules", context)
+	}
+	if *lifecycle.IsPublished ||
+		!bytes.Equal(bytes.TrimSpace(lifecycle.PostDate), []byte("null")) {
+		return fmt.Errorf("%s is published, not a draft", context)
+	}
+	if !bytes.Equal(bytes.TrimSpace(lifecycle.EmailSentAt), []byte("null")) {
+		return fmt.Errorf("%s was sent, not a draft", context)
+	}
+	if len(*lifecycle.PostSchedules) > 0 {
+		return fmt.Errorf("%s is scheduled, not an unscheduled draft", context)
+	}
+	return nil
 }
 
 func (client *Client) requestJSON(

@@ -1,12 +1,17 @@
 # Agent Instructions
 
-This repository intentionally exposes exactly four leaf commands: `version`,
-`drafts create`, `drafts find`, and `posts get`.
+The approved command contract contains exactly five leaf command shapes:
+`version`, `drafts create`, `drafts find`, `drafts update`, and `posts get`.
+All five are exposed. `drafts update` is limited to changing the title and body
+of unscheduled, unpublished drafts.
 
 Safety rules:
 
-- Never add scheduling, publishing, sending, subscriber, Notes, analytics, or
-  browser-login commands without a new reviewed product decision.
+- `drafts update` may change only the title and body of an existing draft. It
+  must read lifecycle state immediately before mutation and refuse scheduled
+  or published posts.
+- No scheduling, publishing, sending, subscriber, Notes, analytics, or
+  browser-login commands are approved.
 - Accept Substack session material only through
   `PP_SUBSTACK_SESSION_COOKIE`.
 - Never print, persist, fixture, record, or include session material in an

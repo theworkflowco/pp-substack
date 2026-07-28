@@ -6,11 +6,560 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"reflect"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/theworkflowco/pp-substack/internal/substack"
 )
+
+type observedUpdateDraftByline struct {
+	ID      *int64 `json:"id"`
+	IsGuest *bool  `json:"is_guest"`
+}
+
+type observedUpdateDraftRequest struct {
+	DetectLanguage       *bool                        `json:"detect_language"`
+	DraftBody            *string                      `json:"draft_body"`
+	DraftBylines         *[]observedUpdateDraftByline `json:"draft_bylines"`
+	DraftPodcastDuration json.RawMessage              `json:"draft_podcast_duration"`
+	DraftPodcastURL      json.RawMessage              `json:"draft_podcast_url"`
+	DraftSectionID       json.RawMessage              `json:"draft_section_id"`
+	DraftSubtitle        *string                      `json:"draft_subtitle"`
+	DraftTitle           *string                      `json:"draft_title"`
+	LastUpdatedAt        *string                      `json:"last_updated_at"`
+	SectionChosen        *bool                        `json:"section_chosen"`
+	Translations         *[]struct{}                  `json:"translations"`
+}
+
+func TestUpdateDraftRejectsInvalidInputMarkerBeforeNetwork(t *testing.T) {
+	t.Parallel()
+
+	const marker = "gtme-issue:11111111-2222-4333-8444-555555555555"
+	for _, test := range []struct {
+		name string
+		body string
+	}{
+		{
+			name: "missing",
+			body: proseMirrorWith(
+				"gtme-issue:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+			),
+		},
+		{
+			name: "duplicated",
+			body: proseMirrorWith(marker + " " + marker),
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			var requestCount atomic.Int32
+			var putCount atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(
+				response http.ResponseWriter,
+				request *http.Request,
+			) {
+				requestCount.Add(1)
+				if request.Method == http.MethodPut {
+					putCount.Add(1)
+				}
+				writeJSON(t, response, http.StatusInternalServerError, map[string]any{})
+			}))
+			defer server.Close()
+
+			client := mustClient(t, server, "connect.sid=synthetic-session")
+			_, err := client.UpdateDraft(
+				context.Background(),
+				"42424242",
+				"Synthetic update title",
+				test.body,
+				marker,
+			)
+			if err == nil || !strings.Contains(err.Error(), "correlation marker") {
+				t.Fatalf(
+					"UpdateDraft() error = %v, want input marker error",
+					err,
+				)
+			}
+			if requestCount.Load() != 0 {
+				t.Errorf("request count = %d, want 0", requestCount.Load())
+			}
+			if putCount.Load() != 0 {
+				t.Errorf("PUT count = %d, want 0", putCount.Load())
+			}
+		})
+	}
+}
+
+func TestUpdateDraftRejectsChangedMarkerOnFinalRefresh(t *testing.T) {
+	t.Parallel()
+
+	const (
+		postID = "42424242"
+		marker = "gtme-issue:11111111-2222-4333-8444-555555555555"
+	)
+	for _, test := range []struct {
+		name          string
+		mutateRefresh func(map[string]any)
+	}{
+		{
+			name: "missing body",
+			mutateRefresh: func(refresh map[string]any) {
+				delete(refresh, "draft_body")
+			},
+		},
+		{
+			name: "different marker",
+			mutateRefresh: func(refresh map[string]any) {
+				refresh["draft_body"] = proseMirrorWith(
+					"gtme-issue:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+				)
+			},
+		},
+		{
+			name: "duplicated marker",
+			mutateRefresh: func(refresh map[string]any) {
+				refresh["draft_body"] = proseMirrorWith(marker + " " + marker)
+			},
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			server, putCount := updateDraftRefreshFailureServer(
+				t,
+				postID,
+				marker,
+				test.mutateRefresh,
+			)
+			defer server.Close()
+
+			client := mustClient(t, server, "connect.sid=synthetic-session")
+			_, err := client.UpdateDraft(
+				context.Background(),
+				postID,
+				"Synthetic update title",
+				proseMirrorWith(marker),
+				marker,
+			)
+			if err == nil || !strings.Contains(err.Error(), "correlation marker") {
+				t.Fatalf(
+					"UpdateDraft() error = %v, want refreshed marker error",
+					err,
+				)
+			}
+			if putCount.Load() != 0 {
+				t.Errorf("PUT count = %d, want 0", putCount.Load())
+			}
+		})
+	}
+}
+
+func TestUpdateDraftRejectsMalformedRefreshTimestamp(t *testing.T) {
+	t.Parallel()
+
+	const (
+		postID = "42424242"
+		marker = "gtme-issue:11111111-2222-4333-8444-555555555555"
+	)
+	server, putCount := updateDraftRefreshFailureServer(
+		t,
+		postID,
+		marker,
+		func(refresh map[string]any) {
+			refresh["draft_updated_at"] = "not-a-timestamp"
+		},
+	)
+	defer server.Close()
+
+	client := mustClient(t, server, "connect.sid=synthetic-session")
+	_, err := client.UpdateDraft(
+		context.Background(),
+		postID,
+		"Synthetic update title",
+		proseMirrorWith(marker),
+		marker,
+	)
+	if err == nil || !strings.Contains(err.Error(), "draft_updated_at") {
+		t.Fatalf(
+			"UpdateDraft() error = %v, want refreshed timestamp error",
+			err,
+		)
+	}
+	if putCount.Load() != 0 {
+		t.Errorf("PUT count = %d, want 0", putCount.Load())
+	}
+}
+
+func TestUpdateDraftSendsObservedRequestAndReturnsDraft(t *testing.T) {
+	t.Parallel()
+
+	const (
+		postID            = "42424242"
+		title             = "Synthetic update title"
+		marker            = "gtme-issue:11111111-2222-4333-8444-555555555555"
+		previousUpdatedAt = "2026-07-28T14:00:00.000Z"
+		syntheticBylineID = 10101
+	)
+	body := proseMirrorWith(marker)
+	numericPostID := mustNumericPostID(t, postID)
+
+	var stage atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(
+		response http.ResponseWriter,
+		request *http.Request,
+	) {
+		switch {
+		case request.Method == http.MethodGet &&
+			request.URL.Path == "/api/v1/drafts/"+postID:
+			if request.URL.RawQuery != "" {
+				t.Errorf("draft detail query = %q, want empty", request.URL.RawQuery)
+			}
+			switch {
+			case stage.CompareAndSwap(0, 1):
+				writeJSON(t, response, http.StatusOK, map[string]any{
+					"id":            numericPostID,
+					"draft_body":    body,
+					"postSchedules": []any{},
+				})
+			case stage.CompareAndSwap(2, 3):
+				writeJSON(t, response, http.StatusOK, map[string]any{
+					"id":               numericPostID,
+					"draft_title":      "Synthetic prior title",
+					"draft_body":       body,
+					"draft_updated_at": previousUpdatedAt,
+					"is_published":     false,
+					"post_date":        nil,
+					"email_sent_at":    nil,
+					"postSchedules":    []any{},
+					"draftBylines": []any{
+						map[string]any{
+							"id":       syntheticBylineID,
+							"is_guest": false,
+						},
+					},
+				})
+			default:
+				t.Fatalf("draft detail request at stage %d", stage.Load())
+			}
+		case request.Method == http.MethodGet &&
+			request.URL.Path == "/api/v1/post_management/scheduled":
+			if request.URL.RawQuery != scheduledFeedQuery {
+				t.Errorf(
+					"scheduled feed query = %q, want %q",
+					request.URL.RawQuery,
+					scheduledFeedQuery,
+				)
+			}
+			if !stage.CompareAndSwap(1, 2) {
+				t.Fatalf("scheduled feed request at stage %d", stage.Load())
+			}
+			writeJSON(t, response, http.StatusOK, emptyScheduledUpdateFeed())
+		case request.Method == http.MethodPut &&
+			request.URL.Path == "/api/v1/drafts/"+postID:
+			if request.URL.RawQuery != "" {
+				t.Errorf("PUT query = %q, want empty", request.URL.RawQuery)
+			}
+			if !stage.CompareAndSwap(3, 4) {
+				t.Errorf("PUT was not immediately preceded by the lifecycle recheck")
+			}
+			if request.Header.Get("Content-Type") != "application/json" {
+				t.Errorf(
+					"Content-Type = %q, want application/json",
+					request.Header.Get("Content-Type"),
+				)
+			}
+			decoder := json.NewDecoder(request.Body)
+			decoder.DisallowUnknownFields()
+			var payload observedUpdateDraftRequest
+			if err := decoder.Decode(&payload); err != nil {
+				t.Fatalf("decode strict PUT payload: %v", err)
+			}
+			var trailing json.RawMessage
+			if err := decoder.Decode(&trailing); err != io.EOF {
+				if err == nil {
+					t.Fatal("decode strict PUT payload: trailing JSON value")
+				}
+				t.Fatalf("decode strict PUT payload: trailing JSON data: %v", err)
+			}
+
+			detectLanguage := true
+			expectedBody := body
+			bylineID := int64(syntheticBylineID)
+			isGuest := false
+			expectedBylines := []observedUpdateDraftByline{
+				{
+					ID:      &bylineID,
+					IsGuest: &isGuest,
+				},
+			}
+			draftSubtitle := ""
+			expectedTitle := title
+			lastUpdatedAt := previousUpdatedAt
+			sectionChosen := false
+			translations := []struct{}{}
+			expected := observedUpdateDraftRequest{
+				DetectLanguage:       &detectLanguage,
+				DraftBody:            &expectedBody,
+				DraftBylines:         &expectedBylines,
+				DraftPodcastDuration: json.RawMessage("null"),
+				DraftPodcastURL:      json.RawMessage("null"),
+				DraftSectionID:       json.RawMessage("null"),
+				DraftSubtitle:        &draftSubtitle,
+				DraftTitle:           &expectedTitle,
+				LastUpdatedAt:        &lastUpdatedAt,
+				SectionChosen:        &sectionChosen,
+				Translations:         &translations,
+			}
+			if !reflect.DeepEqual(payload, expected) {
+				t.Errorf("PUT payload = %#v, want %#v", payload, expected)
+			}
+			writeJSON(
+				t,
+				response,
+				http.StatusOK,
+				loadUpdateDraftResponse(t),
+			)
+		default:
+			t.Fatalf("unexpected request: %s %s", request.Method, request.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := mustClient(t, server, "connect.sid=synthetic-session")
+	result, err := client.UpdateDraft(
+		context.Background(),
+		postID,
+		title,
+		body,
+		marker,
+	)
+	if err != nil {
+		t.Fatalf("UpdateDraft() error = %v", err)
+	}
+	if stage.Load() != 4 {
+		t.Fatalf("request stage = %d, want safe four-request sequence", stage.Load())
+	}
+	assertUpdatedDraftReturned(
+		t,
+		result,
+		postID,
+		server.URL+"/publish/post/"+postID,
+		marker,
+	)
+}
+
+func TestUpdateDraftRefusesScheduledPostBeforeMutation(t *testing.T) {
+	t.Parallel()
+
+	const (
+		postID = "42424242"
+		marker = "gtme-issue:11111111-2222-4333-8444-555555555555"
+	)
+	var putCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(
+		response http.ResponseWriter,
+		request *http.Request,
+	) {
+		switch {
+		case request.Method == http.MethodGet &&
+			request.URL.Path == "/api/v1/drafts/"+postID:
+			if request.URL.RawQuery != "" {
+				t.Errorf("draft detail query = %q, want empty", request.URL.RawQuery)
+			}
+			writeJSON(t, response, http.StatusOK, map[string]any{
+				"id":               42424242,
+				"draft_body":       proseMirrorWith(marker),
+				"draft_updated_at": "2026-07-28T14:00:00.000Z",
+				"is_published":     false,
+				"post_date":        nil,
+				"email_sent_at":    nil,
+				"postSchedules": []any{
+					map[string]any{"trigger_at": "2026-07-29T14:00:00.000Z"},
+				},
+				"draftBylines": []any{
+					map[string]any{"id": 10101, "is_guest": false},
+				},
+			})
+		case request.Method == http.MethodPut:
+			putCount.Add(1)
+			t.Errorf("scheduled post received mutation: %s", request.URL.Path)
+			writeJSON(t, response, http.StatusOK, loadUpdateDraftResponse(t))
+		default:
+			t.Fatalf("unexpected request: %s %s", request.Method, request.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := mustClient(t, server, "connect.sid=synthetic-session")
+	_, err := client.UpdateDraft(
+		context.Background(),
+		postID,
+		"Synthetic update title",
+		proseMirrorWith(marker),
+		marker,
+	)
+	if err == nil || !strings.Contains(err.Error(), "scheduled") {
+		t.Fatalf("UpdateDraft() error = %v, want scheduled-post refusal", err)
+	}
+	if putCount.Load() != 0 {
+		t.Fatalf("PUT count = %d, want 0", putCount.Load())
+	}
+}
+
+func TestUpdateDraftRefusesPublishedPostBeforeMutation(t *testing.T) {
+	t.Parallel()
+
+	const (
+		postID = "42424242"
+		marker = "gtme-issue:11111111-2222-4333-8444-555555555555"
+	)
+	var putCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(
+		response http.ResponseWriter,
+		request *http.Request,
+	) {
+		switch {
+		case request.Method == http.MethodGet &&
+			request.URL.Path == "/api/v1/drafts/"+postID:
+			if request.URL.RawQuery != "" {
+				t.Errorf("draft detail query = %q, want empty", request.URL.RawQuery)
+			}
+			writeJSON(t, response, http.StatusOK, map[string]any{
+				"id":               42424242,
+				"draft_body":       proseMirrorWith(marker),
+				"draft_updated_at": "2026-07-28T14:00:00.000Z",
+				"is_published":     true,
+				"post_date":        "2026-07-28T13:00:00.000Z",
+				"email_sent_at":    nil,
+				"postSchedules":    []any{},
+				"draftBylines": []any{
+					map[string]any{"id": 10101, "is_guest": false},
+				},
+			})
+		case request.Method == http.MethodPut:
+			putCount.Add(1)
+			t.Errorf("published post received mutation: %s", request.URL.Path)
+			writeJSON(t, response, http.StatusOK, loadUpdateDraftResponse(t))
+		default:
+			t.Fatalf("unexpected request: %s %s", request.Method, request.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := mustClient(t, server, "connect.sid=synthetic-session")
+	_, err := client.UpdateDraft(
+		context.Background(),
+		postID,
+		"Synthetic update title",
+		proseMirrorWith(marker),
+		marker,
+	)
+	if err == nil || !strings.Contains(err.Error(), "published") {
+		t.Fatalf("UpdateDraft() error = %v, want published-post refusal", err)
+	}
+	if putCount.Load() != 0 {
+		t.Fatalf("PUT count = %d, want 0", putCount.Load())
+	}
+}
+
+func TestUpdateDraftRequiresMarkerToRoundTripExactlyOnce(t *testing.T) {
+	t.Parallel()
+
+	const (
+		postID = "42424242"
+		marker = "gtme-issue:11111111-2222-4333-8444-555555555555"
+	)
+	for _, test := range []struct {
+		name         string
+		responseBody string
+	}{
+		{name: "missing", responseBody: proseMirrorWith("synthetic-other-marker")},
+		{name: "duplicated", responseBody: proseMirrorWith(marker + " " + marker)},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := updateDraftServer(t, postID, marker, func(response map[string]any) {
+				response["draft_body"] = test.responseBody
+			})
+			defer server.Close()
+
+			client := mustClient(t, server, "connect.sid=synthetic-session")
+			_, err := client.UpdateDraft(
+				context.Background(),
+				postID,
+				"Synthetic update title",
+				proseMirrorWith(marker),
+				marker,
+			)
+			if err == nil {
+				t.Fatal("UpdateDraft() error = nil, want marker round-trip error")
+			}
+		})
+	}
+}
+
+func TestUpdateDraftRejectsResponseForDifferentPost(t *testing.T) {
+	t.Parallel()
+
+	const (
+		postID = "42424242"
+		marker = "gtme-issue:11111111-2222-4333-8444-555555555555"
+	)
+	numericPostID := mustNumericPostID(t, postID)
+	server := updateDraftServer(t, postID, marker, func(response map[string]any) {
+		response["id"] = numericPostID + 1
+	})
+	defer server.Close()
+
+	client := mustClient(t, server, "connect.sid=synthetic-session")
+	_, err := client.UpdateDraft(
+		context.Background(),
+		postID,
+		"Synthetic update title",
+		proseMirrorWith(marker),
+		marker,
+	)
+	if err == nil {
+		t.Fatal("UpdateDraft() error = nil, want response-id mismatch error")
+	}
+}
+
+func TestUpdateDraftRejectsNonDraftResponse(t *testing.T) {
+	t.Parallel()
+
+	const (
+		postID = "42424242"
+		marker = "gtme-issue:11111111-2222-4333-8444-555555555555"
+	)
+	server := updateDraftServer(t, postID, marker, func(response map[string]any) {
+		response["is_published"] = true
+		response["post_date"] = "2026-07-28T14:02:03.000Z"
+	})
+	defer server.Close()
+
+	client := mustClient(t, server, "connect.sid=synthetic-session")
+	_, err := client.UpdateDraft(
+		context.Background(),
+		postID,
+		"Synthetic update title",
+		proseMirrorWith(marker),
+		marker,
+	)
+	if err == nil ||
+		(!strings.Contains(err.Error(), "draft") &&
+			!strings.Contains(err.Error(), "published")) {
+		t.Fatalf("UpdateDraft() error = %v, want non-draft response error", err)
+	}
+}
 
 func TestCreateDraftUsesCookieProfileBylineAndStringifiedBody(t *testing.T) {
 	t.Parallel()
@@ -882,6 +1431,200 @@ func TestGetPostRejectsTrailingJSON(t *testing.T) {
 	result, err := client.GetPost(context.Background(), "208706412")
 	if err == nil || !strings.Contains(err.Error(), "trailing JSON") {
 		t.Fatalf("result = %#v, error = %v; want trailing-JSON error", result, err)
+	}
+}
+
+func updateDraftServer(
+	t *testing.T,
+	postID string,
+	marker string,
+	mutateResponse func(map[string]any),
+) *httptest.Server {
+	t.Helper()
+	numericPostID := mustNumericPostID(t, postID)
+	var stage atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(
+		response http.ResponseWriter,
+		request *http.Request,
+	) {
+		switch {
+		case request.Method == http.MethodGet &&
+			request.URL.Path == "/api/v1/drafts/"+postID:
+			if request.URL.RawQuery != "" {
+				t.Errorf("draft detail query = %q, want empty", request.URL.RawQuery)
+			}
+			switch {
+			case stage.CompareAndSwap(0, 1):
+				writeJSON(t, response, http.StatusOK, map[string]any{
+					"id":            numericPostID,
+					"draft_body":    proseMirrorWith(marker),
+					"postSchedules": []any{},
+				})
+			case stage.CompareAndSwap(2, 3):
+				writeJSON(t, response, http.StatusOK, map[string]any{
+					"id":               numericPostID,
+					"draft_body":       proseMirrorWith(marker),
+					"draft_updated_at": "2026-07-28T14:00:00.000Z",
+					"is_published":     false,
+					"post_date":        nil,
+					"email_sent_at":    nil,
+					"postSchedules":    []any{},
+					"draftBylines": []any{
+						map[string]any{"id": 10101, "is_guest": false},
+					},
+				})
+			default:
+				t.Fatalf("draft detail request at stage %d", stage.Load())
+			}
+		case request.Method == http.MethodGet &&
+			request.URL.Path == "/api/v1/post_management/scheduled":
+			if request.URL.RawQuery != scheduledFeedQuery {
+				t.Errorf(
+					"scheduled feed query = %q, want %q",
+					request.URL.RawQuery,
+					scheduledFeedQuery,
+				)
+			}
+			if !stage.CompareAndSwap(1, 2) {
+				t.Fatalf("scheduled feed request at stage %d", stage.Load())
+			}
+			writeJSON(t, response, http.StatusOK, emptyScheduledUpdateFeed())
+		case request.Method == http.MethodPut &&
+			request.URL.Path == "/api/v1/drafts/"+postID:
+			if request.URL.RawQuery != "" {
+				t.Errorf("PUT query = %q, want empty", request.URL.RawQuery)
+			}
+			if !stage.CompareAndSwap(3, 4) {
+				t.Errorf("PUT was not immediately preceded by the lifecycle recheck")
+			}
+			updateResponse := loadUpdateDraftResponse(t)
+			updateResponse["id"] = numericPostID
+			updateResponse["draft_body"] = proseMirrorWith(marker)
+			mutateResponse(updateResponse)
+			writeJSON(t, response, http.StatusOK, updateResponse)
+		default:
+			t.Fatalf("unexpected request: %s %s", request.Method, request.URL.Path)
+		}
+	}))
+	t.Cleanup(func() {
+		if stage.Load() != 4 {
+			t.Errorf("request stage = %d, want safe four-request sequence", stage.Load())
+		}
+	})
+	return server
+}
+
+func updateDraftRefreshFailureServer(
+	t *testing.T,
+	postID string,
+	marker string,
+	mutateRefresh func(map[string]any),
+) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	numericPostID := mustNumericPostID(t, postID)
+	var stage atomic.Int32
+	var putCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(
+		response http.ResponseWriter,
+		request *http.Request,
+	) {
+		switch {
+		case request.Method == http.MethodGet &&
+			request.URL.Path == "/api/v1/drafts/"+postID:
+			switch {
+			case stage.CompareAndSwap(0, 1):
+				writeJSON(t, response, http.StatusOK, map[string]any{
+					"id":            numericPostID,
+					"draft_body":    proseMirrorWith(marker),
+					"postSchedules": []any{},
+				})
+			case stage.CompareAndSwap(2, 3):
+				refresh := map[string]any{
+					"id":               numericPostID,
+					"draft_body":       proseMirrorWith(marker),
+					"draft_updated_at": "2026-07-28T14:00:00.000Z",
+					"is_published":     false,
+					"post_date":        nil,
+					"email_sent_at":    nil,
+					"postSchedules":    []any{},
+					"draftBylines": []any{
+						map[string]any{"id": 10101, "is_guest": false},
+					},
+				}
+				mutateRefresh(refresh)
+				writeJSON(t, response, http.StatusOK, refresh)
+			default:
+				t.Fatalf("draft detail request at stage %d", stage.Load())
+			}
+		case request.Method == http.MethodGet &&
+			request.URL.Path == "/api/v1/post_management/scheduled":
+			if !stage.CompareAndSwap(1, 2) {
+				t.Fatalf("scheduled feed request at stage %d", stage.Load())
+			}
+			writeJSON(t, response, http.StatusOK, emptyScheduledUpdateFeed())
+		case request.Method == http.MethodPut &&
+			request.URL.Path == "/api/v1/drafts/"+postID:
+			putCount.Add(1)
+			writeJSON(t, response, http.StatusOK, loadUpdateDraftResponse(t))
+		default:
+			t.Fatalf("unexpected request: %s %s", request.Method, request.URL.Path)
+		}
+	}))
+	t.Cleanup(func() {
+		if stage.Load() != 3 {
+			t.Errorf("request stage = %d, want pre-mutation refresh", stage.Load())
+		}
+	})
+	return server, &putCount
+}
+
+func loadUpdateDraftResponse(t *testing.T) map[string]any {
+	t.Helper()
+	contents, err := os.ReadFile("testdata/update-draft-response.json")
+	if err != nil {
+		t.Fatalf("read update draft fixture: %v", err)
+	}
+	var response map[string]any
+	if err := json.Unmarshal(contents, &response); err != nil {
+		t.Fatalf("decode update draft fixture: %v", err)
+	}
+	return response
+}
+
+func assertUpdatedDraftReturned(
+	t *testing.T,
+	result substack.UpdatedDraft,
+	postID string,
+	draftURL string,
+	marker string,
+) {
+	t.Helper()
+	if result.PostID != postID ||
+		result.DraftURL != draftURL ||
+		result.Status != "draft" ||
+		result.CorrelationMarker != marker {
+		t.Errorf("UpdateDraft() result = %#v", result)
+	}
+}
+
+func mustNumericPostID(t *testing.T, postID string) int64 {
+	t.Helper()
+	numericPostID, err := strconv.ParseInt(postID, 10, 64)
+	if err != nil {
+		t.Fatalf("synthetic post id %q is not numeric: %v", postID, err)
+	}
+	return numericPostID
+}
+
+const scheduledFeedQuery = "limit=10&offset=0&order_by=trigger_at&order_direction=asc"
+
+func emptyScheduledUpdateFeed() map[string]any {
+	return map[string]any{
+		"posts":    []any{},
+		"total":    0,
+		"limit":    10,
+		"offset":   0,
+		"isCapped": false,
 	}
 }
 

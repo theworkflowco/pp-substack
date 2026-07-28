@@ -23,7 +23,7 @@ func TestVersionJSON(t *testing.T) {
 	assertJSONEqual(t, output, `{"version":"0.1.0"}`)
 }
 
-func TestRootExposesOnlyApprovedCommandSurface(t *testing.T) {
+func TestRootExposesOnlyFiveLeafCommands(t *testing.T) {
 	t.Parallel()
 
 	root := cli.NewRoot(cli.Options{Version: "0.1.0"})
@@ -64,9 +64,242 @@ func TestRootExposesOnlyApprovedCommandSurface(t *testing.T) {
 	walk("", topLevel)
 	sort.Strings(paths)
 
-	expected := []string{"drafts create", "drafts find", "posts get", "version"}
+	expected := []string{
+		"drafts create",
+		"drafts find",
+		"drafts update",
+		"posts get",
+		"version",
+	}
 	if strings.Join(paths, ",") != strings.Join(expected, ",") {
 		t.Fatalf("leaf commands = %v, want %v", paths, expected)
+	}
+}
+
+func TestDraftUpdateRequiresAllFlags(t *testing.T) {
+	t.Parallel()
+
+	const marker = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
+	flags := []struct {
+		name  string
+		value string
+	}{
+		{name: "publication", value: "gtmengineersearch"},
+		{name: "post-id", value: "208706412"},
+		{name: "title", value: "Updated GTM jobs this week"},
+		{name: "markdown-file", value: "/private/tmp/issue.md"},
+		{name: "correlation-marker", value: marker},
+		{name: "json"},
+	}
+	for _, omitted := range flags {
+		omitted := omitted
+		t.Run(omitted.name, func(t *testing.T) {
+			t.Parallel()
+
+			args := []string{"drafts", "update"}
+			for _, flag := range flags {
+				if flag.name == omitted.name {
+					continue
+				}
+				args = append(args, "--"+flag.name)
+				if flag.value != "" {
+					args = append(args, flag.value)
+				}
+			}
+			_, err := execute(
+				t,
+				authenticatedOptions(&fakeService{}),
+				args...,
+			)
+			if err == nil || !strings.Contains(err.Error(), "--"+omitted.name) {
+				t.Fatalf("error = %v, want missing --%s error", err, omitted.name)
+			}
+			if cli.ExitCode(err) != 2 {
+				t.Fatalf("ExitCode() = %d, want usage exit 2", cli.ExitCode(err))
+			}
+		})
+	}
+}
+
+func TestDraftUpdateConvertsMarkdownAndCallsService(t *testing.T) {
+	t.Parallel()
+
+	const (
+		cookie = "connect.sid=update-secret-cookie"
+		marker = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
+	)
+	fake := &fakeService{
+		updateResult: substack.UpdatedDraft{
+			PostID:            "208706412",
+			DraftURL:          "https://gtmengineersearch.substack.com/publish/post/208706412",
+			Status:            "draft",
+			CorrelationMarker: marker,
+		},
+	}
+	options := cli.Options{
+		Version: "0.1.0",
+		LookupEnv: func(name string) (string, bool) {
+			if name == "PP_SUBSTACK_SESSION_COOKIE" {
+				return cookie, true
+			}
+			return "", false
+		},
+		ReadFile: func(path string) ([]byte, error) {
+			if path != "/private/tmp/updated-issue.md" {
+				t.Fatalf("ReadFile path = %q", path)
+			}
+			return []byte("# Updated GTM jobs\n\nIssue reference: " + marker + "\n"), nil
+		},
+		NewService: func(publication string, receivedCookie string) (cli.Service, error) {
+			if publication != "gtmengineersearch" {
+				t.Errorf("publication = %q", publication)
+			}
+			if receivedCookie != cookie {
+				t.Errorf("cookie was not passed to service")
+			}
+			return fake, nil
+		},
+	}
+
+	_, err := execute(
+		t,
+		options,
+		"drafts",
+		"update",
+		"--publication",
+		"gtmengineersearch",
+		"--post-id",
+		"208706412",
+		"--title",
+		"Updated GTM jobs this week",
+		"--markdown-file",
+		"/private/tmp/updated-issue.md",
+		"--correlation-marker",
+		marker,
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if fake.updateCalls != 1 {
+		t.Fatalf("UpdateDraft() calls = %d, want 1", fake.updateCalls)
+	}
+	if fake.updatePostID != "208706412" {
+		t.Errorf("UpdateDraft() post id = %q", fake.updatePostID)
+	}
+	if fake.updateTitle != "Updated GTM jobs this week" {
+		t.Errorf("UpdateDraft() title = %q", fake.updateTitle)
+	}
+	if fake.updateMarker != marker {
+		t.Errorf("UpdateDraft() marker = %q", fake.updateMarker)
+	}
+	if strings.Count(fake.updateBody, marker) != 1 {
+		t.Errorf(
+			"UpdateDraft() converted body marker count = %d",
+			strings.Count(fake.updateBody, marker),
+		)
+	}
+	if !strings.Contains(fake.updateBody, "Updated GTM jobs") {
+		t.Errorf("UpdateDraft() body = %q", fake.updateBody)
+	}
+}
+
+func TestDraftUpdatePrintsStableJSON(t *testing.T) {
+	t.Parallel()
+
+	const marker = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
+	fake := &fakeService{
+		updateResult: substack.UpdatedDraft{
+			PostID:            "208706412",
+			DraftURL:          "https://gtmengineersearch.substack.com/publish/post/208706412",
+			Status:            "draft",
+			CorrelationMarker: marker,
+		},
+	}
+	options := authenticatedOptions(fake)
+	options.ReadFile = func(string) ([]byte, error) {
+		return []byte("Issue reference: " + marker + "\n"), nil
+	}
+
+	output, err := execute(
+		t,
+		options,
+		"drafts",
+		"update",
+		"--publication",
+		"gtmengineersearch",
+		"--post-id",
+		"208706412",
+		"--title",
+		"Updated GTM jobs this week",
+		"--markdown-file",
+		"/private/tmp/updated-issue.md",
+		"--correlation-marker",
+		marker,
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	const expected = `{"post_id":"208706412","draft_url":"https://gtmengineersearch.substack.com/publish/post/208706412","status":"draft","correlation_marker":"` + marker + `"}` + "\n"
+	if output != expected {
+		t.Fatalf("output = %q, want %q", output, expected)
+	}
+}
+
+func TestDraftUpdateNeverAcceptsCookieFlag(t *testing.T) {
+	t.Parallel()
+
+	const cookie = "connect.sid=must-not-be-a-flag"
+	output, err := execute(
+		t,
+		authenticatedOptions(&fakeService{}),
+		"drafts",
+		"update",
+		"--publication",
+		"gtmengineersearch",
+		"--post-id",
+		"208706412",
+		"--title",
+		"Updated GTM jobs this week",
+		"--markdown-file",
+		"/private/tmp/updated-issue.md",
+		"--correlation-marker",
+		"gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d",
+		"--json",
+		"--cookie",
+		cookie,
+	)
+	if err == nil {
+		t.Fatal("Execute() error = nil, want cookie flag rejection")
+	}
+	if strings.Contains(output, cookie) || strings.Contains(err.Error(), cookie) {
+		t.Fatalf("cookie flag leaked value: output=%q error=%v", output, err)
+	}
+	if cli.ExitCode(err) != 2 {
+		t.Fatalf("ExitCode() = %d, want usage exit 2", cli.ExitCode(err))
+	}
+}
+
+func TestDraftUpdateRedactsMalformedFlagValues(t *testing.T) {
+	t.Parallel()
+
+	const secret = "connect.sid=malformed-flag-secret"
+	output, err := execute(
+		t,
+		authenticatedOptions(&fakeService{}),
+		"drafts",
+		"update",
+		"--json="+secret,
+	)
+	if err == nil {
+		t.Fatal("Execute() error = nil, want malformed flag rejection")
+	}
+	if strings.Contains(output, secret) || strings.Contains(err.Error(), secret) {
+		t.Fatalf("malformed flag leaked value: output=%q error=%v", output, err)
+	}
+	if cli.ExitCode(err) != 2 {
+		t.Fatalf("ExitCode() = %d, want usage exit 2", cli.ExitCode(err))
 	}
 }
 
@@ -464,19 +697,81 @@ func TestAutomationCommandsRequireJSONFlag(t *testing.T) {
 	}
 }
 
-func TestLeafCommandsRejectPositionalArguments(t *testing.T) {
+func TestCommandTreeRejectsPositionalSecretsWithoutEcho(t *testing.T) {
 	t.Parallel()
 
-	_, err := execute(
-		t,
-		cli.Options{Version: "0.1.0"},
-		"version",
-		"--json",
-		"ignored",
-	)
-	if err == nil || !strings.Contains(err.Error(), "unknown command") &&
-		!strings.Contains(err.Error(), "arg") {
-		t.Fatalf("error = %v, want positional-argument rejection", err)
+	const secret = "connect.sid=positional-secret"
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "root", args: []string{secret}},
+		{name: "drafts group", args: []string{"drafts", secret}},
+		{name: "posts group", args: []string{"posts", secret}},
+		{
+			name: "draft update leaf",
+			args: []string{
+				"drafts",
+				"update",
+				"--publication",
+				"gtmengineersearch",
+				"--post-id",
+				"208706412",
+				"--title",
+				"Updated GTM jobs this week",
+				"--markdown-file",
+				"/private/tmp/updated-issue.md",
+				"--correlation-marker",
+				"gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d",
+				"--json",
+				secret,
+			},
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			output, err := execute(
+				t,
+				cli.Options{Version: "0.1.0"},
+				test.args...,
+			)
+			if err == nil {
+				t.Fatal("Execute() error = nil, want positional rejection")
+			}
+			if strings.Contains(output, secret) ||
+				strings.Contains(err.Error(), secret) {
+				t.Fatalf(
+					"positional argument leaked: output=%q error=%v",
+					output,
+					err,
+				)
+			}
+			if cli.ExitCode(err) != 2 {
+				t.Fatalf(
+					"ExitCode() = %d, want usage exit 2",
+					cli.ExitCode(err),
+				)
+			}
+		})
+	}
+}
+
+func TestHelpDescribesDraftUpdates(t *testing.T) {
+	t.Parallel()
+
+	root := cli.NewRoot(cli.Options{Version: "0.1.0"})
+	if !strings.Contains(strings.ToLower(root.Short), "update") {
+		t.Fatalf("root Short = %q, want update", root.Short)
+	}
+	drafts, _, err := root.Find([]string{"drafts"})
+	if err != nil {
+		t.Fatalf("Find(drafts) error = %v", err)
+	}
+	if !strings.Contains(strings.ToLower(drafts.Short), "update") {
+		t.Fatalf("drafts Short = %q, want update", drafts.Short)
 	}
 }
 
@@ -515,6 +810,12 @@ type fakeService struct {
 	createResult substack.Draft
 	createTitle  string
 	createBody   string
+	updateResult substack.UpdatedDraft
+	updateCalls  int
+	updatePostID string
+	updateTitle  string
+	updateBody   string
+	updateMarker string
 	findResult   substack.Found
 	findError    error
 	getResult    substack.Found
@@ -530,6 +831,21 @@ func (fake *fakeService) CreateDraft(
 	fake.createTitle = title
 	fake.createBody = body
 	return fake.createResult, nil
+}
+
+func (fake *fakeService) UpdateDraft(
+	_ context.Context,
+	postID string,
+	title string,
+	body string,
+	correlationMarker string,
+) (substack.UpdatedDraft, error) {
+	fake.updateCalls++
+	fake.updatePostID = postID
+	fake.updateTitle = title
+	fake.updateBody = body
+	fake.updateMarker = correlationMarker
+	return fake.updateResult, nil
 }
 
 func (fake *fakeService) FindByMarker(
