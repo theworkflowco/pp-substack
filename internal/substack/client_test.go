@@ -35,6 +35,168 @@ type observedUpdateDraftRequest struct {
 	Translations         *[]struct{}                  `json:"translations"`
 }
 
+func TestUpdateDraftRejectsInvalidInputMarkerBeforeNetwork(t *testing.T) {
+	t.Parallel()
+
+	const marker = "gtme-issue:11111111-2222-4333-8444-555555555555"
+	for _, test := range []struct {
+		name string
+		body string
+	}{
+		{
+			name: "missing",
+			body: proseMirrorWith(
+				"gtme-issue:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+			),
+		},
+		{
+			name: "duplicated",
+			body: proseMirrorWith(marker + " " + marker),
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			var requestCount atomic.Int32
+			var putCount atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(
+				response http.ResponseWriter,
+				request *http.Request,
+			) {
+				requestCount.Add(1)
+				if request.Method == http.MethodPut {
+					putCount.Add(1)
+				}
+				writeJSON(t, response, http.StatusInternalServerError, map[string]any{})
+			}))
+			defer server.Close()
+
+			client := mustClient(t, server, "connect.sid=synthetic-session")
+			_, err := client.UpdateDraft(
+				context.Background(),
+				"42424242",
+				"Synthetic update title",
+				test.body,
+				marker,
+			)
+			if err == nil || !strings.Contains(err.Error(), "correlation marker") {
+				t.Fatalf(
+					"UpdateDraft() error = %v, want input marker error",
+					err,
+				)
+			}
+			if requestCount.Load() != 0 {
+				t.Errorf("request count = %d, want 0", requestCount.Load())
+			}
+			if putCount.Load() != 0 {
+				t.Errorf("PUT count = %d, want 0", putCount.Load())
+			}
+		})
+	}
+}
+
+func TestUpdateDraftRejectsChangedMarkerOnFinalRefresh(t *testing.T) {
+	t.Parallel()
+
+	const (
+		postID = "42424242"
+		marker = "gtme-issue:11111111-2222-4333-8444-555555555555"
+	)
+	for _, test := range []struct {
+		name          string
+		mutateRefresh func(map[string]any)
+	}{
+		{
+			name: "missing body",
+			mutateRefresh: func(refresh map[string]any) {
+				delete(refresh, "draft_body")
+			},
+		},
+		{
+			name: "different marker",
+			mutateRefresh: func(refresh map[string]any) {
+				refresh["draft_body"] = proseMirrorWith(
+					"gtme-issue:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+				)
+			},
+		},
+		{
+			name: "duplicated marker",
+			mutateRefresh: func(refresh map[string]any) {
+				refresh["draft_body"] = proseMirrorWith(marker + " " + marker)
+			},
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			server, putCount := updateDraftRefreshFailureServer(
+				t,
+				postID,
+				marker,
+				test.mutateRefresh,
+			)
+			defer server.Close()
+
+			client := mustClient(t, server, "connect.sid=synthetic-session")
+			_, err := client.UpdateDraft(
+				context.Background(),
+				postID,
+				"Synthetic update title",
+				proseMirrorWith(marker),
+				marker,
+			)
+			if err == nil || !strings.Contains(err.Error(), "correlation marker") {
+				t.Fatalf(
+					"UpdateDraft() error = %v, want refreshed marker error",
+					err,
+				)
+			}
+			if putCount.Load() != 0 {
+				t.Errorf("PUT count = %d, want 0", putCount.Load())
+			}
+		})
+	}
+}
+
+func TestUpdateDraftRejectsMalformedRefreshTimestamp(t *testing.T) {
+	t.Parallel()
+
+	const (
+		postID = "42424242"
+		marker = "gtme-issue:11111111-2222-4333-8444-555555555555"
+	)
+	server, putCount := updateDraftRefreshFailureServer(
+		t,
+		postID,
+		marker,
+		func(refresh map[string]any) {
+			refresh["draft_updated_at"] = "not-a-timestamp"
+		},
+	)
+	defer server.Close()
+
+	client := mustClient(t, server, "connect.sid=synthetic-session")
+	_, err := client.UpdateDraft(
+		context.Background(),
+		postID,
+		"Synthetic update title",
+		proseMirrorWith(marker),
+		marker,
+	)
+	if err == nil || !strings.Contains(err.Error(), "draft_updated_at") {
+		t.Fatalf(
+			"UpdateDraft() error = %v, want refreshed timestamp error",
+			err,
+		)
+	}
+	if putCount.Load() != 0 {
+		t.Errorf("PUT count = %d, want 0", putCount.Load())
+	}
+}
+
 func TestUpdateDraftSendsObservedRequestAndReturnsDraft(t *testing.T) {
 	t.Parallel()
 
@@ -1350,6 +1512,70 @@ func updateDraftServer(
 		}
 	})
 	return server
+}
+
+func updateDraftRefreshFailureServer(
+	t *testing.T,
+	postID string,
+	marker string,
+	mutateRefresh func(map[string]any),
+) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	numericPostID := mustNumericPostID(t, postID)
+	var stage atomic.Int32
+	var putCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(
+		response http.ResponseWriter,
+		request *http.Request,
+	) {
+		switch {
+		case request.Method == http.MethodGet &&
+			request.URL.Path == "/api/v1/drafts/"+postID:
+			switch {
+			case stage.CompareAndSwap(0, 1):
+				writeJSON(t, response, http.StatusOK, map[string]any{
+					"id":            numericPostID,
+					"draft_body":    proseMirrorWith(marker),
+					"postSchedules": []any{},
+				})
+			case stage.CompareAndSwap(2, 3):
+				refresh := map[string]any{
+					"id":               numericPostID,
+					"draft_body":       proseMirrorWith(marker),
+					"draft_updated_at": "2026-07-28T14:00:00.000Z",
+					"is_published":     false,
+					"post_date":        nil,
+					"email_sent_at":    nil,
+					"postSchedules":    []any{},
+					"draftBylines": []any{
+						map[string]any{"id": 10101, "is_guest": false},
+					},
+				}
+				mutateRefresh(refresh)
+				writeJSON(t, response, http.StatusOK, refresh)
+			default:
+				t.Fatalf("draft detail request at stage %d", stage.Load())
+			}
+		case request.Method == http.MethodGet &&
+			request.URL.Path == "/api/v1/post_management/scheduled":
+			if !stage.CompareAndSwap(1, 2) {
+				t.Fatalf("scheduled feed request at stage %d", stage.Load())
+			}
+			writeJSON(t, response, http.StatusOK, emptyScheduledUpdateFeed())
+		case request.Method == http.MethodPut &&
+			request.URL.Path == "/api/v1/drafts/"+postID:
+			putCount.Add(1)
+			writeJSON(t, response, http.StatusOK, loadUpdateDraftResponse(t))
+		default:
+			t.Fatalf("unexpected request: %s %s", request.Method, request.URL.Path)
+		}
+	}))
+	t.Cleanup(func() {
+		if stage.Load() != 3 {
+			t.Errorf("request stage = %d, want pre-mutation refresh", stage.Load())
+		}
+	})
+	return server, &putCount
 }
 
 func loadUpdateDraftResponse(t *testing.T) map[string]any {
