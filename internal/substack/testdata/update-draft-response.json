@@ -1,0 +1,16 @@
+{
+  "id": 42424242,
+  "draft_title": "Synthetic update title",
+  "draft_body": "{\"type\":\"doc\",\"content\":[{\"type\":\"paragraph\",\"content\":[{\"type\":\"text\",\"text\":\"gtme-issue:11111111-2222-4333-8444-555555555555\"}]}]}",
+  "draft_updated_at": "2026-07-28T14:02:03.000Z",
+  "is_published": false,
+  "post_date": null,
+  "email_sent_at": null,
+  "postSchedules": [],
+  "draftBylines": [
+    {
+      "id": 10101,
+      "is_guest": false
+    }
+  ]
+}
