@@ -1,9 +1,8 @@
 # pp-substack
 
-`pp-substack` creates Substack newsletter drafts and reads their lifecycle
-state for reconciliation. A safe draft-only update command is approved but
-not yet released or usable. The CLI never schedules, publishes, sends, or
-manages subscribers.
+`pp-substack` creates and safely updates Substack newsletter drafts and reads
+their lifecycle state for reconciliation. The CLI never schedules, publishes,
+sends, or manages subscribers.
 
 Substack does not publish a supported API for these writer workflows. This
 client follows browser-observed endpoints and therefore fails loudly when the
@@ -45,10 +44,35 @@ pp-substack drafts create \
 The cookie is accepted only from `PP_SUBSTACK_SESSION_COOKIE`. It is never
 accepted as an argument, written to local state, or included in errors.
 
+To update a draft, first commit the rendered Markdown so the intended content
+is durable and reviewable. Then read the post's current lifecycle state:
+
+```bash
+pp-substack posts get \
+  --publication gtmengineersearch \
+  --post-id 208706412 \
+  --json
+```
+
+Run the mutation only when that command exits `0` with `status` equal to
+`draft`:
+
+```bash
+pp-substack drafts update \
+  --publication gtmengineersearch \
+  --post-id 208706412 \
+  --title "Updated GTM jobs this week" \
+  --markdown-file ./issue.md \
+  --correlation-marker gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d \
+  --json
+```
+
+After an ambiguous update error, reconcile with `posts get`. Never retry the
+mutation merely because its response was lost.
+
 ## Command Contract
 
-The approved command contract contains five shapes. Four are currently
-exposed:
+The approved command contract exposes exactly five shapes:
 
 ```text
 pp-substack version --json
@@ -56,22 +80,16 @@ pp-substack drafts create --publication <slug> --title <title> \
   --markdown-file <path> --correlation-marker <marker> --json
 pp-substack drafts find --publication <slug> \
   --correlation-marker <marker> --json
-pp-substack posts get --publication <slug> --post-id <id> --json
-```
-
-### Reserved command shape — not implemented or usable
-
-```text
 pp-substack drafts update --publication <slug> --post-id <id> \
   --title <title> --markdown-file <path> \
   --correlation-marker <marker> --json
+pp-substack posts get --publication <slug> --post-id <id> --json
 ```
 
-The `drafts update` shape is reserved by this contract; the command is not
-released or usable yet. It may change only the title and body of an existing
-draft. It must read lifecycle state immediately before mutation and refuse
-scheduled or published posts. No scheduling, publishing, sending, subscriber,
-Notes, analytics, or browser-login commands are approved.
+`drafts update` changes only the title and body of an existing draft. It reads
+lifecycle state immediately before mutation and refuses scheduled or published
+posts. No scheduling, publishing, sending, subscriber, Notes, analytics, or
+browser-login commands are approved.
 
 Every automation command requires `--json`. `drafts find` and `posts get`
 return `{"found":false}` when absence is authoritative; the `post` key is
@@ -97,6 +115,11 @@ Use `drafts find` before every create attempt. Treat a non-zero exit as an
 unknown external state unless the error itself establishes otherwise. Never
 retry `drafts create` merely because the caller did not receive its response;
 reconcile by marker first.
+
+Before an update, commit the Markdown, call `posts get`, and proceed only when
+the post status is `draft`. After any ambiguous update result, call `posts get`
+to reconcile. Never automatically retry `drafts update` merely because its
+response was lost.
 
 Substack's observed create request has no externally enforced idempotency
 header or request field. The correlation marker supports reconciliation but

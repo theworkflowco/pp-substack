@@ -2,9 +2,8 @@
 
 The approved command contract contains exactly five leaf command shapes:
 `version`, `drafts create`, `drafts find`, `drafts update`, and `posts get`.
-Only four are currently exposed: `version`, `drafts create`, `drafts find`,
-and `posts get`. `drafts update` is reserved by the contract and is not yet
-exposed, implemented, or usable.
+All five are exposed. `drafts update` is limited to changing the title and body
+of unscheduled, unpublished drafts.
 
 Safety rules:
 
