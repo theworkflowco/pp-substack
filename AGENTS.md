@@ -1,7 +1,10 @@
 # Agent Instructions
 
-This repository intentionally exposes exactly five leaf commands: `version`,
-`drafts create`, `drafts find`, `drafts update`, and `posts get`.
+The approved command contract contains exactly five leaf command shapes:
+`version`, `drafts create`, `drafts find`, `drafts update`, and `posts get`.
+Only four are currently exposed: `version`, `drafts create`, `drafts find`,
+and `posts get`. `drafts update` is reserved by the contract and is not yet
+exposed, implemented, or usable.
 
 Safety rules:
 

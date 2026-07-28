@@ -47,14 +47,24 @@ accepted as an argument, written to local state, or included in errors.
 
 ## Command Contract
 
+The approved command contract contains five shapes. Four are currently
+exposed:
+
 ```text
 pp-substack version --json
 pp-substack drafts create --publication <slug> --title <title> \
   --markdown-file <path> --correlation-marker <marker> --json
 pp-substack drafts find --publication <slug> \
   --correlation-marker <marker> --json
-pp-substack drafts update --publication <slug> --post-id <id> --title <title> --markdown-file <path> --correlation-marker <marker> --json
 pp-substack posts get --publication <slug> --post-id <id> --json
+```
+
+### Reserved command shape — not implemented or usable
+
+```text
+pp-substack drafts update --publication <slug> --post-id <id> \
+  --title <title> --markdown-file <path> \
+  --correlation-marker <marker> --json
 ```
 
 The `drafts update` shape is reserved by this contract; the command is not
