@@ -1341,6 +1341,113 @@ func TestGetPostNormalizesPublishedStateByID(t *testing.T) {
 	}
 }
 
+func TestGetPostBuildsPublishedReaderURLFromSlug(t *testing.T) {
+	t.Parallel()
+
+	const marker = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
+	const publishedAt = "2026-07-28T16:05:00Z"
+	publicationServer := newRouteServer(t, map[string]routeResponse{
+		"/api/v1/drafts/208706412": {
+			status: http.StatusNotFound,
+			body:   map[string]any{"error": "not found"},
+		},
+	})
+	defer publicationServer.Close()
+	accountServer := newRouteServer(t, map[string]routeResponse{
+		"/api/v1/posts/by-id/208706412": {
+			status: http.StatusOK,
+			body: map[string]any{
+				"post": map[string]any{
+					"id":        208706412,
+					"body_html": "<p>" + marker + "</p>",
+					"post_date": publishedAt,
+					"slug":      "test-post",
+				},
+				"publication": map[string]any{
+					"hostname": strings.TrimPrefix(
+						publicationServer.URL,
+						"http://",
+					),
+				},
+			},
+		},
+	})
+	defer accountServer.Close()
+
+	client, err := substack.NewClient(
+		publicationServer.URL,
+		accountServer.URL,
+		"connect.sid=session",
+		publicationServer.Client(),
+	)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	result, err := client.GetPost(context.Background(), "208706412")
+	if err != nil {
+		t.Fatalf("GetPost() error = %v", err)
+	}
+	if !result.Found || result.Post == nil {
+		t.Fatalf("result = %#v, want found", result)
+	}
+	wantURL := strings.Replace(
+		publicationServer.URL,
+		"http://",
+		"https://",
+		1,
+	) + "/p/test-post"
+	if result.Post.PostURL != wantURL {
+		t.Fatalf("PostURL = %q, want %q", result.Post.PostURL, wantURL)
+	}
+}
+
+func TestGetPostRejectsUnsafePublishedSlug(t *testing.T) {
+	t.Parallel()
+
+	const marker = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
+	publicationServer := newRouteServer(t, map[string]routeResponse{
+		"/api/v1/drafts/208706412": {
+			status: http.StatusNotFound,
+			body:   map[string]any{"error": "not found"},
+		},
+	})
+	defer publicationServer.Close()
+	accountServer := newRouteServer(t, map[string]routeResponse{
+		"/api/v1/posts/by-id/208706412": {
+			status: http.StatusOK,
+			body: map[string]any{
+				"post": map[string]any{
+					"id":        208706412,
+					"body_html": "<p>" + marker + "</p>",
+					"post_date": "2026-07-28T16:05:00Z",
+					"slug":      "nested/path",
+				},
+				"publication": map[string]any{
+					"hostname": strings.TrimPrefix(
+						publicationServer.URL,
+						"http://",
+					),
+				},
+			},
+		},
+	})
+	defer accountServer.Close()
+
+	client, err := substack.NewClient(
+		publicationServer.URL,
+		accountServer.URL,
+		"connect.sid=session",
+		publicationServer.Client(),
+	)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	result, err := client.GetPost(context.Background(), "208706412")
+	if err == nil || !strings.Contains(err.Error(), "safe slug") {
+		t.Fatalf("result = %#v, error = %v; want unsafe slug error", result, err)
+	}
+}
+
 func TestGetPostRejectsInvalidPublishedCanonicalURL(t *testing.T) {
 	t.Parallel()
 

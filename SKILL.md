@@ -69,5 +69,7 @@ mutation merely because its response was lost.
 
 Treat `post_url` according to lifecycle: draft and scheduled results expose
 the writer-management URL; published results expose the canonical public
-reader URL. A published read that cannot verify a safe same-publication
-HTTPS `/p/<slug>` canonical URL fails loudly.
+reader URL. Validate Substack's `canonical_url` when present; otherwise use
+the published endpoint's `slug` with the already-verified publication host.
+A published read that cannot verify a safe same-publication HTTPS
+`/p/<slug>` URL fails loudly.

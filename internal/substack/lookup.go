@@ -43,6 +43,7 @@ type rawPost struct {
 	Body          string          `json:"body"`
 	PostDate      *string         `json:"post_date"`
 	CanonicalURL  *string         `json:"canonical_url"`
+	Slug          *string         `json:"slug"`
 	TriggerAt     *string         `json:"trigger_at"`
 	PostSchedules []struct {
 		TriggerAt *string `json:"trigger_at"`
@@ -543,7 +544,7 @@ func (client *Client) normalizePost(raw rawPost) (Post, error) {
 		}
 		status = "published"
 		publishedAt = raw.PostDate
-		postURL, err = client.publishedReaderURL(raw.CanonicalURL)
+		postURL, err = client.publishedReaderURL(raw.CanonicalURL, raw.Slug)
 		if err != nil {
 			return Post{}, err
 		}
@@ -571,9 +572,24 @@ func (client *Client) normalizePost(raw rawPost) (Post, error) {
 	}, nil
 }
 
-func (client *Client) publishedReaderURL(canonicalURL *string) (string, error) {
+func (client *Client) publishedReaderURL(
+	canonicalURL *string,
+	slug *string,
+) (string, error) {
 	if canonicalURL == nil || strings.TrimSpace(*canonicalURL) == "" {
-		return "", fmt.Errorf("published post is missing canonical_url")
+		if slug == nil ||
+			*slug == "" ||
+			*slug != strings.TrimSpace(*slug) ||
+			strings.ContainsAny(*slug, "/?#") {
+			return "", fmt.Errorf(
+				"published post is missing canonical_url and a safe slug",
+			)
+		}
+		return (&url.URL{
+			Scheme: "https",
+			Host:   client.publicationHost,
+			Path:   "/p/" + *slug,
+		}).String(), nil
 	}
 	parsed, err := url.Parse(*canonicalURL)
 	if err != nil ||
