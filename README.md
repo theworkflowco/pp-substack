@@ -104,10 +104,12 @@ Status values are strict:
   `null`.
 
 For `draft` and `scheduled`, `post_url` is the writer-management URL. For
-`published`, `post_url` is the canonical public reader URL returned by the
-published endpoint. It must be an HTTPS `/p/<slug>` URL on the requested
-publication host. A missing, unsafe, management, or cross-publication canonical
-URL is a contract error.
+`published`, `post_url` is the canonical public reader URL. The CLI validates
+`canonical_url` when Substack supplies it; otherwise it constructs the URL
+from the published endpoint's `slug` and already-verified publication host.
+The result must be an HTTPS `/p/<slug>` URL on the requested publication host.
+A missing or unsafe slug, unsafe management URL, or cross-publication host is a
+contract error.
 
 The correlation marker must be a visible `gtme-issue:<uuid>` token that occurs
 exactly once in the Markdown. The converter supports heading levels 1–6,
