@@ -66,3 +66,8 @@ only when the reported status is `draft`. The command reads lifecycle state
 again immediately before mutation and refuses scheduled or published posts.
 After an ambiguous update error, reconcile with `posts get`; never retry the
 mutation merely because its response was lost.
+
+Treat `post_url` according to lifecycle: draft and scheduled results expose
+the writer-management URL; published results expose the canonical public
+reader URL. A published read that cannot verify a safe same-publication
+HTTPS `/p/<slug>` canonical URL fails loudly.

@@ -103,6 +103,12 @@ Status values are strict:
 - `published`: `published_at` is RFC 3339; `scheduled_at` is RFC 3339 or
   `null`.
 
+For `draft` and `scheduled`, `post_url` is the writer-management URL. For
+`published`, `post_url` is the canonical public reader URL returned by the
+published endpoint. It must be an HTTPS `/p/<slug>` URL on the requested
+publication host. A missing, unsafe, management, or cross-publication canonical
+URL is a contract error.
+
 The correlation marker must be a visible `gtme-issue:<uuid>` token that occurs
 exactly once in the Markdown. The converter supports heading levels 1–6,
 paragraphs, bullet lists, strong and italic emphasis, horizontal rules,
