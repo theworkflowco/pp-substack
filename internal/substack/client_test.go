@@ -847,6 +847,12 @@ func TestFindByMarkerReturnsPublishedPostFromGlobalEnvelope(t *testing.T) {
 					"id":        208706412,
 					"body_html": "<p>" + marker + "</p>",
 					"post_date": publishedAt,
+					"canonical_url": strings.Replace(
+						publicationServer.URL,
+						"http://",
+						"https://",
+						1,
+					) + "/p/test-post",
 				},
 				"publication": map[string]any{
 					"hostname": strings.TrimPrefix(publicationServer.URL, "http://"),
@@ -873,6 +879,14 @@ func TestFindByMarkerReturnsPublishedPostFromGlobalEnvelope(t *testing.T) {
 		t.Fatalf("result = %#v, want published post", result)
 	}
 	assertPost(t, *result.Post, "208706412", "published", marker, nil, stringPointer(publishedAt))
+	if result.Post.PostURL != strings.Replace(
+		publicationServer.URL,
+		"http://",
+		"https://",
+		1,
+	)+"/p/test-post" {
+		t.Fatalf("PostURL = %q, want canonical reader URL", result.Post.PostURL)
+	}
 }
 
 func TestFindByMarkerPrefersScheduledEvidenceWhenIDOverlapsDraftFeed(t *testing.T) {
@@ -1282,10 +1296,15 @@ func TestGetPostNormalizesPublishedStateByID(t *testing.T) {
 			status: http.StatusOK,
 			body: map[string]any{
 				"post": map[string]any{
-					"id":            208706412,
-					"body_html":     "<p>" + marker + "</p>",
-					"post_date":     publishedAt,
-					"canonical_url": "https://publication.example/p/test-post",
+					"id":        208706412,
+					"body_html": "<p>" + marker + "</p>",
+					"post_date": publishedAt,
+					"canonical_url": strings.Replace(
+						publicationServer.URL,
+						"http://",
+						"https://",
+						1,
+					) + "/p/test-post",
 				},
 				"publication": map[string]any{
 					"hostname": strings.TrimPrefix(publicationServer.URL, "http://"),
@@ -1312,6 +1331,124 @@ func TestGetPostNormalizesPublishedStateByID(t *testing.T) {
 		t.Fatalf("result = %#v, want found", result)
 	}
 	assertPost(t, *result.Post, "208706412", "published", marker, nil, stringPointer(publishedAt))
+	if result.Post.PostURL != strings.Replace(
+		publicationServer.URL,
+		"http://",
+		"https://",
+		1,
+	)+"/p/test-post" {
+		t.Fatalf("PostURL = %q, want canonical reader URL", result.Post.PostURL)
+	}
+}
+
+func TestGetPostRejectsInvalidPublishedCanonicalURL(t *testing.T) {
+	t.Parallel()
+
+	const marker = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
+	tests := []struct {
+		name         string
+		canonicalURL func(string) any
+		errorText    string
+	}{
+		{
+			name:         "missing",
+			canonicalURL: func(string) any { return nil },
+			errorText:    "canonical_url",
+		},
+		{
+			name: "unsafe",
+			canonicalURL: func(string) any {
+				return "javascript:alert(1)"
+			},
+			errorText: "canonical_url",
+		},
+		{
+			name: "different host",
+			canonicalURL: func(string) any {
+				return "https://other.example/p/test-post"
+			},
+			errorText: "does not match",
+		},
+		{
+			name: "insecure",
+			canonicalURL: func(publicationURL string) any {
+				return publicationURL + "/p/test-post"
+			},
+			errorText: "HTTPS",
+		},
+		{
+			name: "management path",
+			canonicalURL: func(publicationURL string) any {
+				return strings.Replace(
+					publicationURL,
+					"http://",
+					"https://",
+					1,
+				) + "/publish/post/208706412"
+			},
+			errorText: "reader URL",
+		},
+		{
+			name: "empty reader slug",
+			canonicalURL: func(publicationURL string) any {
+				return strings.Replace(
+					publicationURL,
+					"http://",
+					"https://",
+					1,
+				) + "/p/"
+			},
+			errorText: "reader URL",
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			publicationServer := newRouteServer(t, map[string]routeResponse{
+				"/api/v1/drafts/208706412": {
+					status: http.StatusNotFound,
+					body:   map[string]any{"error": "not found"},
+				},
+			})
+			defer publicationServer.Close()
+			post := map[string]any{
+				"id":        208706412,
+				"body_html": "<p>" + marker + "</p>",
+				"post_date": "2026-07-28T16:05:00Z",
+			}
+			canonicalURL := test.canonicalURL(publicationServer.URL)
+			if canonicalURL != nil {
+				post["canonical_url"] = canonicalURL
+			}
+			accountServer := newRouteServer(t, map[string]routeResponse{
+				"/api/v1/posts/by-id/208706412": {
+					status: http.StatusOK,
+					body: map[string]any{
+						"post": post,
+						"publication": map[string]any{
+							"hostname": strings.TrimPrefix(publicationServer.URL, "http://"),
+						},
+					},
+				},
+			})
+			defer accountServer.Close()
+
+			client, err := substack.NewClient(
+				publicationServer.URL,
+				accountServer.URL,
+				"connect.sid=session",
+				publicationServer.Client(),
+			)
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
+			result, err := client.GetPost(context.Background(), "208706412")
+			if err == nil || !strings.Contains(err.Error(), test.errorText) {
+				t.Fatalf("result = %#v, error = %v; want %q", result, err, test.errorText)
+			}
+		})
+	}
 }
 
 func TestGetPostRejectsPublishedPostFromDifferentPublication(t *testing.T) {

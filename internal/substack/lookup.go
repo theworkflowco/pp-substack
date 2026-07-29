@@ -42,6 +42,7 @@ type rawPost struct {
 	BodyJSON      json.RawMessage `json:"body_json"`
 	Body          string          `json:"body"`
 	PostDate      *string         `json:"post_date"`
+	CanonicalURL  *string         `json:"canonical_url"`
 	TriggerAt     *string         `json:"trigger_at"`
 	PostSchedules []struct {
 		TriggerAt *string `json:"trigger_at"`
@@ -533,6 +534,7 @@ func (client *Client) normalizePost(raw rawPost) (Post, error) {
 	}
 
 	status := "draft"
+	postURL := client.publicationBaseURL + "/publish/post/" + url.PathEscape(id)
 	var scheduledAt *string
 	var publishedAt *string
 	if raw.PostDate != nil && *raw.PostDate != "" {
@@ -541,6 +543,10 @@ func (client *Client) normalizePost(raw rawPost) (Post, error) {
 		}
 		status = "published"
 		publishedAt = raw.PostDate
+		postURL, err = client.publishedReaderURL(raw.CanonicalURL)
+		if err != nil {
+			return Post{}, err
+		}
 		if schedule := scheduleTime(raw); schedule != nil {
 			if err := validateRFC3339(*schedule, "scheduled time"); err != nil {
 				return Post{}, err
@@ -557,12 +563,41 @@ func (client *Client) normalizePost(raw rawPost) (Post, error) {
 
 	return Post{
 		PostID:            id,
-		PostURL:           client.publicationBaseURL + "/publish/post/" + url.PathEscape(id),
+		PostURL:           postURL,
 		Status:            status,
 		ScheduledAt:       scheduledAt,
 		PublishedAt:       publishedAt,
 		CorrelationMarker: marker,
 	}, nil
+}
+
+func (client *Client) publishedReaderURL(canonicalURL *string) (string, error) {
+	if canonicalURL == nil || strings.TrimSpace(*canonicalURL) == "" {
+		return "", fmt.Errorf("published post is missing canonical_url")
+	}
+	parsed, err := url.Parse(*canonicalURL)
+	if err != nil ||
+		parsed.Host == "" ||
+		parsed.User != nil {
+		return "", fmt.Errorf("published post canonical_url is not a safe HTTP(S) URL")
+	}
+	if parsed.Scheme != "https" {
+		return "", fmt.Errorf("published post canonical_url must use HTTPS")
+	}
+	if !strings.EqualFold(parsed.Host, client.publicationHost) {
+		return "", fmt.Errorf(
+			"published post canonical_url host %q does not match %q",
+			parsed.Host,
+			client.publicationHost,
+		)
+	}
+	if !strings.HasPrefix(parsed.Path, "/p/") ||
+		strings.Trim(strings.TrimPrefix(parsed.Path, "/p/"), "/") == "" {
+		return "", fmt.Errorf(
+			"published post canonical_url is not a public reader URL",
+		)
+	}
+	return parsed.String(), nil
 }
 
 func scheduleTime(raw rawPost) *string {
