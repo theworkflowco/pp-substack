@@ -85,6 +85,19 @@ type UpdateError struct {
 	Cause              error
 }
 
+type draftRefreshError struct {
+	Code  string
+	Cause error
+}
+
+func (err *draftRefreshError) Error() string { return err.Cause.Error() }
+
+func (err *draftRefreshError) Unwrap() error { return err.Cause }
+
+func invalidDraftRefresh(code string, cause error) error {
+	return &draftRefreshError{Code: code, Cause: cause}
+}
+
 func (err *UpdateError) Error() string {
 	return err.Cause.Error()
 }
@@ -300,8 +313,11 @@ func (client *Client) UpdateDraft(
 	current, err := client.refreshDraft(ctx, postID, correlationMarker)
 	if err != nil {
 		code := "draft_refresh_invalid"
+		var refreshErr *draftRefreshError
 		var httpErr *HTTPError
-		if errors.As(err, &httpErr) {
+		if errors.As(err, &refreshErr) {
+			code = refreshErr.Code
+		} else if errors.As(err, &httpErr) {
 			code = "draft_refresh_failed"
 		}
 		return UpdatedDraft{}, updateError(
@@ -541,36 +557,60 @@ func (client *Client) refreshDraft(
 	}
 	currentID, err := parseID(current.ID)
 	if err != nil {
-		return refreshedDraft{}, fmt.Errorf("refreshed response %w", err)
+		return refreshedDraft{}, invalidDraftRefresh(
+			"draft_refresh_identity_invalid",
+			fmt.Errorf("refreshed response %w", err),
+		)
 	}
 	if currentID != postID {
-		return refreshedDraft{}, fmt.Errorf(
-			"refreshed response id %q does not match requested id %q",
-			currentID,
-			postID,
+		return refreshedDraft{}, invalidDraftRefresh(
+			"draft_refresh_identity_invalid",
+			fmt.Errorf(
+				"refreshed response id %q does not match requested id %q",
+				currentID,
+				postID,
+			),
 		)
 	}
 	if err := validateDraftLifecycle("refreshed response", current.draftLifecycle); err != nil {
-		return refreshedDraft{}, err
+		return refreshedDraft{}, invalidDraftRefresh(
+			"draft_refresh_lifecycle_invalid",
+			err,
+		)
 	}
 	if current.DraftUpdatedAt == nil || strings.TrimSpace(*current.DraftUpdatedAt) == "" {
-		return refreshedDraft{}, fmt.Errorf("refreshed response is missing draft_updated_at")
+		return refreshedDraft{}, invalidDraftRefresh(
+			"draft_refresh_updated_at_invalid",
+			fmt.Errorf("refreshed response is missing draft_updated_at"),
+		)
 	}
 	if err := validateRFC3339(*current.DraftUpdatedAt, "draft_updated_at"); err != nil {
-		return refreshedDraft{}, fmt.Errorf("refreshed response %w", err)
+		return refreshedDraft{}, invalidDraftRefresh(
+			"draft_refresh_updated_at_invalid",
+			fmt.Errorf("refreshed response %w", err),
+		)
 	}
 	if current.DraftBody == nil {
-		return refreshedDraft{}, fmt.Errorf(
-			"refreshed response is missing draft_body needed to verify correlation marker",
+		return refreshedDraft{}, invalidDraftRefresh(
+			"draft_refresh_body_invalid",
+			fmt.Errorf(
+				"refreshed response is missing draft_body needed to verify correlation marker",
+			),
 		)
 	}
 	if strings.Count(*current.DraftBody, correlationMarker) != 1 {
-		return refreshedDraft{}, fmt.Errorf(
-			"refreshed response correlation marker is not present exactly once",
+		return refreshedDraft{}, invalidDraftRefresh(
+			"draft_refresh_marker_invalid",
+			fmt.Errorf(
+				"refreshed response correlation marker is not present exactly once",
+			),
 		)
 	}
 	if current.DraftBylines == nil || len(*current.DraftBylines) == 0 {
-		return refreshedDraft{}, fmt.Errorf("refreshed response has no draft bylines")
+		return refreshedDraft{}, invalidDraftRefresh(
+			"draft_refresh_bylines_invalid",
+			fmt.Errorf("refreshed response has no draft bylines"),
+		)
 	}
 	return current, nil
 }
