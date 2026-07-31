@@ -67,13 +67,26 @@ func ErrorOutput(err error) ([]byte, bool) {
 		Stage:              string(updateErr.Stage),
 		Code:               updateErr.Code,
 		MutationDispatched: updateErr.MutationDispatched,
-		Message:            updateErr.Error(),
+		Message:            safeUpdateErrorMessage(updateErr.Stage),
 	}
 	encoded, marshalErr := json.Marshal(envelope)
 	if marshalErr != nil {
 		return nil, false
 	}
 	return encoded, true
+}
+
+func safeUpdateErrorMessage(stage substack.UpdateStage) string {
+	switch stage {
+	case substack.UpdateStagePreMutation:
+		return "Substack draft update failed before mutation"
+	case substack.UpdateStageMutationUnknown:
+		return "Substack draft update result is unknown"
+	case substack.UpdateStagePostMutationVerification:
+		return "Substack draft update response could not be verified"
+	default:
+		return "Substack draft update failed"
+	}
 }
 
 func requiredFlag(name string) error {

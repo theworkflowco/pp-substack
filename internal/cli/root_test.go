@@ -23,7 +23,7 @@ func TestVersionJSON(t *testing.T) {
 	assertJSONEqual(t, output, `{"version":"0.1.0"}`)
 }
 
-func TestRootExposesOnlyFiveLeafCommands(t *testing.T) {
+func TestRootExposesOnlySixLeafCommands(t *testing.T) {
 	t.Parallel()
 
 	root := cli.NewRoot(cli.Options{Version: "0.1.0"})
@@ -65,6 +65,7 @@ func TestRootExposesOnlyFiveLeafCommands(t *testing.T) {
 	sort.Strings(paths)
 
 	expected := []string{
+		"drafts compare",
 		"drafts create",
 		"drafts find",
 		"drafts update",
@@ -74,6 +75,62 @@ func TestRootExposesOnlyFiveLeafCommands(t *testing.T) {
 	if strings.Join(paths, ",") != strings.Join(expected, ",") {
 		t.Fatalf("leaf commands = %v, want %v", paths, expected)
 	}
+}
+
+func TestDraftCompareConvertsMarkdownAndPrintsStableJSON(t *testing.T) {
+	t.Parallel()
+
+	const marker = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
+	fake := &fakeService{
+		compareResult: substack.DraftComparison{
+			PostID:            "208706412",
+			Status:            "draft",
+			Matches:           true,
+			TitleMatches:      true,
+			BodyMatches:       true,
+			DraftUpdatedAt:    "2026-07-31T14:00:00.000Z",
+			CorrelationMarker: marker,
+		},
+	}
+	options := authenticatedOptions(fake)
+	options.ReadFile = func(string) ([]byte, error) {
+		return []byte("# Updated GTM jobs\n\nIssue reference: " + marker + "\n"), nil
+	}
+
+	output, err := execute(
+		t,
+		options,
+		"drafts",
+		"compare",
+		"--publication",
+		"gtmengineersearch",
+		"--post-id",
+		"208706412",
+		"--title",
+		"Updated GTM jobs this week",
+		"--markdown-file",
+		"/private/tmp/updated-issue.md",
+		"--correlation-marker",
+		marker,
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if fake.compareCalls != 1 || fake.comparePostID != "208706412" ||
+		fake.compareTitle != "Updated GTM jobs this week" ||
+		fake.compareMarker != marker || !strings.Contains(fake.compareBody, marker) {
+		t.Fatalf("CompareDraft() call = %#v", fake)
+	}
+	assertJSONEqual(t, output, `{
+		"post_id":"208706412",
+		"status":"draft",
+		"matches":true,
+		"title_matches":true,
+		"body_matches":true,
+		"draft_updated_at":"2026-07-31T14:00:00.000Z",
+		"correlation_marker":"`+marker+`"
+	}`)
 }
 
 func TestDraftUpdateRequiresAllFlags(t *testing.T) {
@@ -259,7 +316,7 @@ func TestDraftUpdateErrorEnvelopeIsStableAndSecretFree(t *testing.T) {
 			Stage:              substack.UpdateStageMutationUnknown,
 			Code:               "update_transport_failed",
 			MutationDispatched: true,
-			Cause:              errors.New("update transport failed"),
+			Cause:              errors.New("transport failed: " + cookie),
 		},
 	}
 	options := authenticatedOptions(fake)
@@ -312,7 +369,7 @@ func TestDraftUpdateErrorEnvelopeIsStableAndSecretFree(t *testing.T) {
 		envelope.Stage != "mutation_unknown" ||
 		envelope.Code != "update_transport_failed" ||
 		!envelope.MutationDispatched ||
-		envelope.Message != "update transport failed" {
+		envelope.Message != "Substack draft update result is unknown" {
 		t.Fatalf("ErrorOutput() envelope = %#v", envelope)
 	}
 	if strings.Contains(string(output), cookie) {
@@ -483,6 +540,7 @@ func TestDraftsFindFoundEmitsNormalizedPost(t *testing.T) {
 	t.Parallel()
 
 	const marker = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
+	const updated = "2026-07-31T14:00:00.000Z"
 	fake := &fakeService{
 		findResult: substack.Found{
 			Found: true,
@@ -490,6 +548,7 @@ func TestDraftsFindFoundEmitsNormalizedPost(t *testing.T) {
 				PostID:            "208706412",
 				PostURL:           "https://gtmengineersearch.substack.com/publish/post/208706412",
 				Status:            "draft",
+				DraftUpdatedAt:    stringPointer(updated),
 				CorrelationMarker: marker,
 			},
 		},
@@ -517,6 +576,7 @@ func TestDraftsFindFoundEmitsNormalizedPost(t *testing.T) {
 			"status":"draft",
 			"scheduled_at":null,
 			"published_at":null,
+			"draft_updated_at":"`+updated+`",
 			"correlation_marker":"`+marker+`"
 		}}`,
 	)
@@ -526,6 +586,7 @@ func TestPostsGetReturnsFoundEnvelope(t *testing.T) {
 	t.Parallel()
 
 	const marker = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
+	const updated = "2026-07-31T14:00:00.000Z"
 	fake := &fakeService{
 		getResult: substack.Found{
 			Found: true,
@@ -535,6 +596,7 @@ func TestPostsGetReturnsFoundEnvelope(t *testing.T) {
 				Status:            "draft",
 				ScheduledAt:       nil,
 				PublishedAt:       nil,
+				DraftUpdatedAt:    stringPointer(updated),
 				CorrelationMarker: marker,
 			},
 		},
@@ -564,6 +626,7 @@ func TestPostsGetReturnsFoundEnvelope(t *testing.T) {
 				"status":"draft",
 				"scheduled_at":null,
 				"published_at":null,
+				"draft_updated_at":"`+updated+`",
 				"correlation_marker":"`+marker+`"
 			}
 		}`,
@@ -577,6 +640,7 @@ func TestPostsGetEmitsScheduledPublishedAndDeletedStates(t *testing.T) {
 		marker      = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
 		scheduledAt = "2026-07-28T16:00:00Z"
 		publishedAt = "2026-07-28T16:05:00Z"
+		updatedAt   = "2026-07-31T14:00:00.000Z"
 	)
 	tests := []struct {
 		name     string
@@ -590,6 +654,7 @@ func TestPostsGetEmitsScheduledPublishedAndDeletedStates(t *testing.T) {
 				PostURL:           "https://gtmengineersearch.substack.com/publish/post/208706412",
 				Status:            "scheduled",
 				ScheduledAt:       stringPointer(scheduledAt),
+				DraftUpdatedAt:    stringPointer(updatedAt),
 				CorrelationMarker: marker,
 			}},
 			expected: `{"found":true,"post":{
@@ -598,6 +663,7 @@ func TestPostsGetEmitsScheduledPublishedAndDeletedStates(t *testing.T) {
 				"status":"scheduled",
 				"scheduled_at":"` + scheduledAt + `",
 				"published_at":null,
+				"draft_updated_at":"` + updatedAt + `",
 				"correlation_marker":"` + marker + `"
 			}}`,
 		},
@@ -617,6 +683,7 @@ func TestPostsGetEmitsScheduledPublishedAndDeletedStates(t *testing.T) {
 				"status":"published",
 				"scheduled_at":"` + scheduledAt + `",
 				"published_at":"` + publishedAt + `",
+				"draft_updated_at":null,
 				"correlation_marker":"` + marker + `"
 			}}`,
 		},
@@ -880,20 +947,26 @@ func TestExitCodeClassifiesAuthRemoteAndContractFailures(t *testing.T) {
 }
 
 type fakeService struct {
-	createResult substack.Draft
-	createTitle  string
-	createBody   string
-	updateResult substack.UpdatedDraft
-	updateCalls  int
-	updatePostID string
-	updateTitle  string
-	updateBody   string
-	updateMarker string
-	updateError  error
-	findResult   substack.Found
-	findError    error
-	getResult    substack.Found
-	getError     error
+	createResult  substack.Draft
+	createTitle   string
+	createBody    string
+	updateResult  substack.UpdatedDraft
+	updateCalls   int
+	updatePostID  string
+	updateTitle   string
+	updateBody    string
+	updateMarker  string
+	updateError   error
+	compareResult substack.DraftComparison
+	compareCalls  int
+	comparePostID string
+	compareTitle  string
+	compareBody   string
+	compareMarker string
+	findResult    substack.Found
+	findError     error
+	getResult     substack.Found
+	getError      error
 }
 
 func (fake *fakeService) CreateDraft(
@@ -920,6 +993,21 @@ func (fake *fakeService) UpdateDraft(
 	fake.updateBody = body
 	fake.updateMarker = correlationMarker
 	return fake.updateResult, fake.updateError
+}
+
+func (fake *fakeService) CompareDraft(
+	_ context.Context,
+	postID string,
+	title string,
+	body string,
+	correlationMarker string,
+) (substack.DraftComparison, error) {
+	fake.compareCalls++
+	fake.comparePostID = postID
+	fake.compareTitle = title
+	fake.compareBody = body
+	fake.compareMarker = correlationMarker
+	return fake.compareResult, nil
 }
 
 func (fake *fakeService) FindByMarker(

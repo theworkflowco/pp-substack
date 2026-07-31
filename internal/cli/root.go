@@ -33,6 +33,13 @@ type Service interface {
 		proseMirrorBody string,
 		correlationMarker string,
 	) (substack.UpdatedDraft, error)
+	CompareDraft(
+		ctx context.Context,
+		postID string,
+		title string,
+		proseMirrorBody string,
+		correlationMarker string,
+	) (substack.DraftComparison, error)
 	FindByMarker(ctx context.Context, correlationMarker string) (substack.Found, error)
 	GetPost(ctx context.Context, postID string) (substack.Found, error)
 }
@@ -69,6 +76,7 @@ func NewRoot(options Options) *cobra.Command {
 		RunE:  showHelp,
 	}
 	drafts.AddCommand(newDraftCreateCommand(options))
+	drafts.AddCommand(newDraftCompareCommand(options))
 	drafts.AddCommand(newDraftFindCommand(options))
 	drafts.AddCommand(newDraftUpdateCommand(options))
 	root.AddCommand(drafts)
@@ -82,6 +90,79 @@ func NewRoot(options Options) *cobra.Command {
 	posts.AddCommand(newPostGetCommand(options))
 	root.AddCommand(posts)
 	return root
+}
+
+func newDraftCompareCommand(options Options) *cobra.Command {
+	var publication string
+	var postID string
+	var title string
+	var markdownFile string
+	var correlationMarker string
+	var asJSON bool
+	command := &cobra.Command{
+		Use:   "compare",
+		Short: "Compare intended title and body with an existing draft",
+		Args:  rejectPositionalArguments,
+		Example: "  pp-substack drafts compare --publication gtmengineersearch " +
+			"--post-id 208706412 --title \"Updated GTM jobs this week\" " +
+			"--markdown-file ./issue.md " +
+			"--correlation-marker gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d --json",
+		RunE: func(command *cobra.Command, _ []string) error {
+			if err := validateJSONAndPublication(asJSON, publication); err != nil {
+				return err
+			}
+			if strings.TrimSpace(postID) == "" {
+				return requiredFlag("post-id")
+			}
+			if strings.TrimSpace(title) == "" {
+				return requiredFlag("title")
+			}
+			if strings.TrimSpace(markdownFile) == "" {
+				return requiredFlag("markdown-file")
+			}
+			if strings.TrimSpace(correlationMarker) == "" {
+				return requiredFlag("correlation-marker")
+			}
+			if err := substack.ValidateCorrelationMarker(correlationMarker); err != nil {
+				return usageError(err.Error())
+			}
+			service, err := authenticatedService(options, publication)
+			if err != nil {
+				return err
+			}
+			source, err := options.ReadFile(markdownFile)
+			if err != nil {
+				return fmt.Errorf("read --markdown-file: %w", err)
+			}
+			body, err := markdown.ToProseMirror(string(source), correlationMarker)
+			if err != nil {
+				return fmt.Errorf("convert --markdown-file: %w", err)
+			}
+			result, err := service.CompareDraft(
+				command.Context(),
+				postID,
+				title,
+				body,
+				correlationMarker,
+			)
+			if err != nil {
+				return err
+			}
+			return printJSON(command, result)
+		},
+	}
+	command.Flags().StringVar(&publication, "publication", "", "Substack publication slug")
+	command.Flags().StringVar(&postID, "post-id", "", "External Substack draft ID")
+	command.Flags().StringVar(&title, "title", "", "Intended newsletter draft title")
+	command.Flags().StringVar(&markdownFile, "markdown-file", "", "Path to the intended Markdown issue")
+	command.Flags().StringVar(
+		&correlationMarker,
+		"correlation-marker",
+		"",
+		"Deterministic gtme-issue:<uuid> reconciliation marker",
+	)
+	command.Flags().BoolVar(&asJSON, "json", false, "Write the stable JSON response contract")
+	return command
 }
 
 func newVersionCommand(options Options) *cobra.Command {

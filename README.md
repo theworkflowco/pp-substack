@@ -67,17 +67,35 @@ pp-substack drafts update \
   --json
 ```
 
-After an ambiguous update error, reconcile with `posts get`. Never retry the
-mutation merely because its response was lost.
+After an update error whose structured stage is `mutation_unknown` or
+`post_mutation_verification`, reconcile the intended bytes with a read-only
+comparison:
+
+```bash
+pp-substack drafts compare \
+  --publication gtmengineersearch \
+  --post-id 208706412 \
+  --title "Updated GTM jobs this week" \
+  --markdown-file ./issue.md \
+  --correlation-marker gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d \
+  --json
+```
+
+`drafts compare` converts the Markdown through the same path as `drafts
+update`, then compares the exact title and ProseMirror body using GET requests
+only. Never retry the mutation merely because its response was lost.
 
 ## Command Contract
 
-The approved command contract exposes exactly five shapes:
+The approved command contract exposes exactly six shapes:
 
 ```text
 pp-substack version --json
 pp-substack drafts create --publication <slug> --title <title> \
   --markdown-file <path> --correlation-marker <marker> --json
+pp-substack drafts compare --publication <slug> --post-id <id> \
+  --title <title> --markdown-file <path> \
+  --correlation-marker <marker> --json
 pp-substack drafts find --publication <slug> \
   --correlation-marker <marker> --json
 pp-substack drafts update --publication <slug> --post-id <id> \
@@ -96,12 +114,21 @@ return `{"found":false}` when absence is authoritative; the `post` key is
 omitted. Authentication, authorization, transport, rate-limit, ambiguity, and
 response-contract failures remain errors.
 
+Failed `drafts update` commands write a stable
+`pp-substack-update-error-v1` JSON envelope to stderr. Its `stage` is
+`pre_mutation`, `mutation_unknown`, or `post_mutation_verification`, and
+`mutation_dispatched` records whether the PUT may have started. Other command
+errors retain their human-readable stderr contract.
+
 Status values are strict:
 
 - `draft`: both lifecycle timestamps are `null`.
 - `scheduled`: `scheduled_at` is RFC 3339 and `published_at` is `null`.
 - `published`: `published_at` is RFC 3339; `scheduled_at` is RFC 3339 or
   `null`.
+
+Draft and scheduled post results also report Substack's RFC 3339
+`draft_updated_at`. Published results report that field as `null`.
 
 For `draft` and `scheduled`, `post_url` is the writer-management URL. For
 `published`, `post_url` is the canonical public reader URL. The CLI validates
@@ -125,9 +152,11 @@ retry `drafts create` merely because the caller did not receive its response;
 reconcile by marker first.
 
 Before an update, commit the Markdown, call `posts get`, and proceed only when
-the post status is `draft`. After any ambiguous update result, call `posts get`
-to reconcile. Never automatically retry `drafts update` merely because its
-response was lost.
+the post status is `draft`. After a possibly dispatched update result, call
+`drafts compare` with those exact committed inputs. An exact match proves
+success; an authoritative mismatch proves that revision is absent; an
+unreadable draft remains ambiguous. Never automatically retry `drafts update`
+merely because its response was lost.
 
 Substack's observed create request has no externally enforced idempotency
 header or request field. The correlation marker supports reconciliation but
@@ -190,6 +219,18 @@ Read lifecycle state by the stored external ID:
 pp-substack posts get \
   --publication gtmengineersearch \
   --post-id 208706412 \
+  --json
+```
+
+Compare an intended committed revision without mutating the draft:
+
+```bash
+pp-substack drafts compare \
+  --publication gtmengineersearch \
+  --post-id 208706412 \
+  --title "Updated GTM jobs this week" \
+  --markdown-file ./issue.md \
+  --correlation-marker gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d \
   --json
 ```
 
