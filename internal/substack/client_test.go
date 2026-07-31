@@ -235,12 +235,105 @@ func TestUpdateDraftReportsPreMutationStageEvidence(t *testing.T) {
 		t.Fatalf("UpdateDraft() error = %v, want *substack.UpdateError", err)
 	}
 	if updateErr.Stage != substack.UpdateStagePreMutation ||
-		updateErr.Code != "draft_refresh_invalid" ||
+		updateErr.Code != "draft_refresh_updated_at_invalid" ||
 		updateErr.MutationDispatched {
 		t.Fatalf("UpdateDraft() evidence = %#v", updateErr)
 	}
 	if putCount.Load() != 0 {
 		t.Fatalf("PUT count = %d, want 0", putCount.Load())
+	}
+}
+
+func TestUpdateDraftReportsSpecificRefreshFailureCodes(t *testing.T) {
+	t.Parallel()
+
+	const (
+		postID = "42424242"
+		marker = "gtme-issue:11111111-2222-4333-8444-555555555555"
+	)
+	tests := []struct {
+		name   string
+		code   string
+		mutate func(map[string]any)
+	}{
+		{
+			name: "identity",
+			code: "draft_refresh_identity_invalid",
+			mutate: func(refresh map[string]any) {
+				refresh["id"] = 42424243
+			},
+		},
+		{
+			name: "lifecycle",
+			code: "draft_refresh_lifecycle_invalid",
+			mutate: func(refresh map[string]any) {
+				delete(refresh, "is_published")
+			},
+		},
+		{
+			name: "updated at",
+			code: "draft_refresh_updated_at_invalid",
+			mutate: func(refresh map[string]any) {
+				refresh["draft_updated_at"] = "invalid"
+			},
+		},
+		{
+			name: "body",
+			code: "draft_refresh_body_invalid",
+			mutate: func(refresh map[string]any) {
+				delete(refresh, "draft_body")
+			},
+		},
+		{
+			name: "marker",
+			code: "draft_refresh_marker_invalid",
+			mutate: func(refresh map[string]any) {
+				refresh["draft_body"] = proseMirrorWith(
+					"gtme-issue:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+				)
+			},
+		},
+		{
+			name: "bylines",
+			code: "draft_refresh_bylines_invalid",
+			mutate: func(refresh map[string]any) {
+				delete(refresh, "draftBylines")
+			},
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			server, putCount := updateDraftRefreshFailureServer(
+				t,
+				postID,
+				marker,
+				test.mutate,
+			)
+			defer server.Close()
+
+			client := mustClient(t, server, "connect.sid=synthetic-session")
+			_, err := client.UpdateDraft(
+				context.Background(),
+				postID,
+				"Synthetic update title",
+				proseMirrorWith(marker),
+				marker,
+			)
+			var updateErr *substack.UpdateError
+			if !errors.As(err, &updateErr) {
+				t.Fatalf("UpdateDraft() error = %v, want *substack.UpdateError", err)
+			}
+			if updateErr.Stage != substack.UpdateStagePreMutation ||
+				updateErr.Code != test.code ||
+				updateErr.MutationDispatched {
+				t.Fatalf("UpdateDraft() evidence = %#v, want code %q", updateErr, test.code)
+			}
+			if putCount.Load() != 0 {
+				t.Fatalf("PUT count = %d, want 0", putCount.Load())
+			}
+		})
 	}
 }
 
