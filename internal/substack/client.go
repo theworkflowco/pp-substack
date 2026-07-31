@@ -335,54 +335,58 @@ func (client *Client) UpdateDraft(
 		ID      json.Number `json:"id"`
 		IsGuest bool        `json:"is_guest"`
 	}
-	bylines := make([]updateByline, len(*current.DraftBylines))
-	for index, byline := range *current.DraftBylines {
-		if byline.ID == "" {
-			return UpdatedDraft{}, updateError(
-				UpdateStagePreMutation,
-				"draft_refresh_invalid",
-				false,
-				fmt.Errorf("update Substack draft: refreshed response draft byline %d is missing id", index),
-			)
+	var bylines *[]updateByline
+	if current.DraftBylines != nil && len(*current.DraftBylines) > 0 {
+		converted := make([]updateByline, len(*current.DraftBylines))
+		for index, byline := range *current.DraftBylines {
+			if byline.ID == "" {
+				return UpdatedDraft{}, updateError(
+					UpdateStagePreMutation,
+					"draft_refresh_invalid",
+					false,
+					fmt.Errorf("update Substack draft: refreshed response draft byline %d is missing id", index),
+				)
+			}
+			if _, err := strconv.ParseUint(byline.ID.String(), 10, 64); err != nil {
+				return UpdatedDraft{}, updateError(
+					UpdateStagePreMutation,
+					"draft_refresh_invalid",
+					false,
+					fmt.Errorf(
+						"update Substack draft: refreshed response draft byline %d has invalid id: %w",
+						index,
+						err,
+					),
+				)
+			}
+			if byline.IsGuest == nil {
+				return UpdatedDraft{}, updateError(
+					UpdateStagePreMutation,
+					"draft_refresh_invalid",
+					false,
+					fmt.Errorf("update Substack draft: refreshed response draft byline %d is missing is_guest", index),
+				)
+			}
+			converted[index] = updateByline{
+				ID:      byline.ID,
+				IsGuest: *byline.IsGuest,
+			}
 		}
-		if _, err := strconv.ParseUint(byline.ID.String(), 10, 64); err != nil {
-			return UpdatedDraft{}, updateError(
-				UpdateStagePreMutation,
-				"draft_refresh_invalid",
-				false,
-				fmt.Errorf(
-					"update Substack draft: refreshed response draft byline %d has invalid id: %w",
-					index,
-					err,
-				),
-			)
-		}
-		if byline.IsGuest == nil {
-			return UpdatedDraft{}, updateError(
-				UpdateStagePreMutation,
-				"draft_refresh_invalid",
-				false,
-				fmt.Errorf("update Substack draft: refreshed response draft byline %d is missing is_guest", index),
-			)
-		}
-		bylines[index] = updateByline{
-			ID:      byline.ID,
-			IsGuest: *byline.IsGuest,
-		}
+		bylines = &converted
 	}
 
 	payload := struct {
-		DetectLanguage       bool           `json:"detect_language"`
-		DraftBody            string         `json:"draft_body"`
-		DraftBylines         []updateByline `json:"draft_bylines"`
-		DraftPodcastDuration *string        `json:"draft_podcast_duration"`
-		DraftPodcastURL      *string        `json:"draft_podcast_url"`
-		DraftSectionID       *string        `json:"draft_section_id"`
-		DraftSubtitle        string         `json:"draft_subtitle"`
-		DraftTitle           string         `json:"draft_title"`
-		LastUpdatedAt        string         `json:"last_updated_at"`
-		SectionChosen        bool           `json:"section_chosen"`
-		Translations         []struct{}     `json:"translations"`
+		DetectLanguage       bool            `json:"detect_language"`
+		DraftBody            string          `json:"draft_body"`
+		DraftBylines         *[]updateByline `json:"draft_bylines,omitempty"`
+		DraftPodcastDuration *string         `json:"draft_podcast_duration"`
+		DraftPodcastURL      *string         `json:"draft_podcast_url"`
+		DraftSectionID       *string         `json:"draft_section_id"`
+		DraftSubtitle        string          `json:"draft_subtitle"`
+		DraftTitle           string          `json:"draft_title"`
+		LastUpdatedAt        string          `json:"last_updated_at"`
+		SectionChosen        bool            `json:"section_chosen"`
+		Translations         []struct{}      `json:"translations"`
 	}{
 		DetectLanguage: true,
 		DraftBody:      proseMirrorBody,
@@ -611,12 +615,6 @@ func (client *Client) refreshDraft(
 		return refreshedDraft{}, invalidDraftRefresh(
 			"draft_refresh_bylines_invalid",
 			err,
-		)
-	}
-	if current.DraftBylines == nil || len(*current.DraftBylines) == 0 {
-		return refreshedDraft{}, invalidDraftRefresh(
-			"draft_refresh_bylines_invalid",
-			fmt.Errorf("refreshed response has no draft bylines"),
 		)
 	}
 	return current, nil

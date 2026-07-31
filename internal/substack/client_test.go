@@ -293,13 +293,6 @@ func TestUpdateDraftReportsSpecificRefreshFailureCodes(t *testing.T) {
 				)
 			},
 		},
-		{
-			name: "bylines",
-			code: "draft_refresh_bylines_invalid",
-			mutate: func(refresh map[string]any) {
-				delete(refresh, "draftBylines")
-			},
-		},
 	}
 	for _, test := range tests {
 		test := test
@@ -334,6 +327,44 @@ func TestUpdateDraftReportsSpecificRefreshFailureCodes(t *testing.T) {
 				t.Fatalf("PUT count = %d, want 0", putCount.Load())
 			}
 		})
+	}
+}
+
+func TestUpdateDraftOmitsUndisclosedRefreshBylines(t *testing.T) {
+	t.Parallel()
+
+	const (
+		postID = "42424242"
+		marker = "gtme-issue:11111111-2222-4333-8444-555555555555"
+	)
+	server, putCount := updateDraftRefreshFailureServer(
+		t,
+		postID,
+		marker,
+		func(refresh map[string]any) {
+			delete(refresh, "draftBylines")
+			delete(refresh, "draft_bylines")
+		},
+		func(payload map[string]json.RawMessage) {
+			if _, found := payload["draft_bylines"]; found {
+				t.Errorf("PUT payload contains draft_bylines, want field omitted")
+			}
+		},
+	)
+	defer server.Close()
+
+	client := mustClient(t, server, "connect.sid=synthetic-session")
+	if _, err := client.UpdateDraft(
+		context.Background(),
+		postID,
+		"Synthetic update title",
+		proseMirrorWith(marker),
+		marker,
+	); err != nil {
+		t.Fatalf("UpdateDraft() error = %v", err)
+	}
+	if putCount.Load() != 1 {
+		t.Fatalf("PUT count = %d, want 1", putCount.Load())
 	}
 }
 
@@ -2338,6 +2369,7 @@ func updateDraftRefreshFailureServer(
 	postID string,
 	marker string,
 	mutateRefresh func(map[string]any),
+	assertPut ...func(map[string]json.RawMessage),
 ) (*httptest.Server, *atomic.Int32) {
 	t.Helper()
 	numericPostID := mustNumericPostID(t, postID)
@@ -2385,6 +2417,11 @@ func updateDraftRefreshFailureServer(
 		case request.Method == http.MethodPut &&
 			request.URL.Path == "/api/v1/drafts/"+postID:
 			putCount.Add(1)
+			if len(assertPut) > 0 {
+				var payload map[string]json.RawMessage
+				decodeJSON(t, request.Body, &payload)
+				assertPut[0](payload)
+			}
 			writeJSON(t, response, http.StatusOK, loadUpdateDraftResponse(t))
 		default:
 			t.Fatalf("unexpected request: %s %s", request.Method, request.URL.Path)
