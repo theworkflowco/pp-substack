@@ -49,6 +49,7 @@ type refreshedDraft struct {
 	DraftBody      *string         `json:"draft_body"`
 	DraftUpdatedAt *string         `json:"draft_updated_at"`
 	DraftBylines   *[]draftByline  `json:"draftBylines"`
+	DraftBylinesV1 *[]draftByline  `json:"draft_bylines"`
 }
 
 type DraftComparison struct {
@@ -606,6 +607,12 @@ func (client *Client) refreshDraft(
 			),
 		)
 	}
+	if err := normalizeDraftBylines(&current); err != nil {
+		return refreshedDraft{}, invalidDraftRefresh(
+			"draft_refresh_bylines_invalid",
+			err,
+		)
+	}
 	if current.DraftBylines == nil || len(*current.DraftBylines) == 0 {
 		return refreshedDraft{}, invalidDraftRefresh(
 			"draft_refresh_bylines_invalid",
@@ -613,6 +620,37 @@ func (client *Client) refreshDraft(
 		)
 	}
 	return current, nil
+}
+
+func normalizeDraftBylines(current *refreshedDraft) error {
+	if current.DraftBylines == nil {
+		current.DraftBylines = current.DraftBylinesV1
+		return nil
+	}
+	if current.DraftBylinesV1 == nil {
+		return nil
+	}
+	if !equalDraftBylines(*current.DraftBylines, *current.DraftBylinesV1) {
+		return fmt.Errorf(
+			"refreshed response contains conflicting draft byline representations",
+		)
+	}
+	return nil
+}
+
+func equalDraftBylines(left []draftByline, right []draftByline) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index].ID != right[index].ID ||
+			(left[index].IsGuest == nil) != (right[index].IsGuest == nil) ||
+			(left[index].IsGuest != nil &&
+				*left[index].IsGuest != *right[index].IsGuest) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateDraftLifecycle(context string, lifecycle draftLifecycle) error {

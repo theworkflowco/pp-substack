@@ -337,6 +337,77 @@ func TestUpdateDraftReportsSpecificRefreshFailureCodes(t *testing.T) {
 	}
 }
 
+func TestUpdateDraftAcceptsSnakeCaseRefreshBylines(t *testing.T) {
+	t.Parallel()
+
+	const (
+		postID = "42424242"
+		marker = "gtme-issue:11111111-2222-4333-8444-555555555555"
+	)
+	server, putCount := updateDraftRefreshFailureServer(
+		t,
+		postID,
+		marker,
+		func(refresh map[string]any) {
+			refresh["draft_bylines"] = refresh["draftBylines"]
+			delete(refresh, "draftBylines")
+		},
+	)
+	defer server.Close()
+
+	client := mustClient(t, server, "connect.sid=synthetic-session")
+	if _, err := client.UpdateDraft(
+		context.Background(),
+		postID,
+		"Synthetic update title",
+		proseMirrorWith(marker),
+		marker,
+	); err != nil {
+		t.Fatalf("UpdateDraft() error = %v", err)
+	}
+	if putCount.Load() != 1 {
+		t.Fatalf("PUT count = %d, want 1", putCount.Load())
+	}
+}
+
+func TestUpdateDraftRejectsConflictingRefreshBylineRepresentations(t *testing.T) {
+	t.Parallel()
+
+	const (
+		postID = "42424242"
+		marker = "gtme-issue:11111111-2222-4333-8444-555555555555"
+	)
+	server, putCount := updateDraftRefreshFailureServer(
+		t,
+		postID,
+		marker,
+		func(refresh map[string]any) {
+			refresh["draft_bylines"] = []any{
+				map[string]any{"id": 20202, "is_guest": false},
+			}
+		},
+	)
+	defer server.Close()
+
+	client := mustClient(t, server, "connect.sid=synthetic-session")
+	_, err := client.UpdateDraft(
+		context.Background(),
+		postID,
+		"Synthetic update title",
+		proseMirrorWith(marker),
+		marker,
+	)
+	var updateErr *substack.UpdateError
+	if !errors.As(err, &updateErr) ||
+		updateErr.Code != "draft_refresh_bylines_invalid" ||
+		updateErr.MutationDispatched {
+		t.Fatalf("UpdateDraft() evidence = %#v", updateErr)
+	}
+	if putCount.Load() != 0 {
+		t.Fatalf("PUT count = %d, want 0", putCount.Load())
+	}
+}
+
 func TestUpdateDraftReportsMutationUnknownStageEvidence(t *testing.T) {
 	t.Parallel()
 
