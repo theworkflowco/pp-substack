@@ -12,7 +12,11 @@ var version = "dev"
 func main() {
 	command := cli.NewRoot(cli.Options{Version: version})
 	if err := command.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		if output, ok := cli.ErrorOutput(err); ok {
+			fmt.Fprintln(os.Stderr, string(output))
+		} else {
+			fmt.Fprintln(os.Stderr, err)
+		}
 		os.Exit(cli.ExitCode(err))
 	}
 }

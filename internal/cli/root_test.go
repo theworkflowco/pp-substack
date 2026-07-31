@@ -247,6 +247,79 @@ func TestDraftUpdatePrintsStableJSON(t *testing.T) {
 	}
 }
 
+func TestDraftUpdateErrorEnvelopeIsStableAndSecretFree(t *testing.T) {
+	t.Parallel()
+
+	const (
+		marker = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
+		cookie = "connect.sid=never-print-this-session"
+	)
+	fake := &fakeService{
+		updateError: &substack.UpdateError{
+			Stage:              substack.UpdateStageMutationUnknown,
+			Code:               "update_transport_failed",
+			MutationDispatched: true,
+			Cause:              errors.New("update transport failed"),
+		},
+	}
+	options := authenticatedOptions(fake)
+	options.LookupEnv = func(name string) (string, bool) {
+		if name == "PP_SUBSTACK_SESSION_COOKIE" {
+			return cookie, true
+		}
+		return "", false
+	}
+	options.ReadFile = func(string) ([]byte, error) {
+		return []byte("Issue reference: " + marker + "\n"), nil
+	}
+
+	_, err := execute(
+		t,
+		options,
+		"drafts",
+		"update",
+		"--publication",
+		"gtmengineersearch",
+		"--post-id",
+		"208706412",
+		"--title",
+		"Updated GTM jobs this week",
+		"--markdown-file",
+		"/private/tmp/updated-issue.md",
+		"--correlation-marker",
+		marker,
+		"--json",
+	)
+	if err == nil {
+		t.Fatal("Execute() error = nil, want staged update error")
+	}
+
+	output, ok := cli.ErrorOutput(err)
+	if !ok {
+		t.Fatalf("ErrorOutput() ok = false for %T", err)
+	}
+	var envelope struct {
+		SchemaVersion      string `json:"schema_version"`
+		Stage              string `json:"stage"`
+		Code               string `json:"code"`
+		MutationDispatched bool   `json:"mutation_dispatched"`
+		Message            string `json:"message"`
+	}
+	if decodeErr := json.Unmarshal(output, &envelope); decodeErr != nil {
+		t.Fatalf("ErrorOutput() = %q: %v", output, decodeErr)
+	}
+	if envelope.SchemaVersion != "pp-substack-update-error-v1" ||
+		envelope.Stage != "mutation_unknown" ||
+		envelope.Code != "update_transport_failed" ||
+		!envelope.MutationDispatched ||
+		envelope.Message != "update transport failed" {
+		t.Fatalf("ErrorOutput() envelope = %#v", envelope)
+	}
+	if strings.Contains(string(output), cookie) {
+		t.Fatalf("ErrorOutput() leaked session cookie: %q", output)
+	}
+}
+
 func TestDraftUpdateNeverAcceptsCookieFlag(t *testing.T) {
 	t.Parallel()
 
@@ -816,6 +889,7 @@ type fakeService struct {
 	updateTitle  string
 	updateBody   string
 	updateMarker string
+	updateError  error
 	findResult   substack.Found
 	findError    error
 	getResult    substack.Found
@@ -845,7 +919,7 @@ func (fake *fakeService) UpdateDraft(
 	fake.updateTitle = title
 	fake.updateBody = body
 	fake.updateMarker = correlationMarker
-	return fake.updateResult, nil
+	return fake.updateResult, fake.updateError
 }
 
 func (fake *fakeService) FindByMarker(

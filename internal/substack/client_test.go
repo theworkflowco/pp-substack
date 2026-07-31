@@ -3,6 +3,8 @@ package substack_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +17,12 @@ import (
 
 	"github.com/theworkflowco/pp-substack/internal/substack"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return function(request)
+}
 
 type observedUpdateDraftByline struct {
 	ID      *int64 `json:"id"`
@@ -194,6 +202,128 @@ func TestUpdateDraftRejectsMalformedRefreshTimestamp(t *testing.T) {
 	}
 	if putCount.Load() != 0 {
 		t.Errorf("PUT count = %d, want 0", putCount.Load())
+	}
+}
+
+func TestUpdateDraftReportsPreMutationStageEvidence(t *testing.T) {
+	t.Parallel()
+
+	const (
+		postID = "42424242"
+		marker = "gtme-issue:11111111-2222-4333-8444-555555555555"
+	)
+	server, putCount := updateDraftRefreshFailureServer(
+		t,
+		postID,
+		marker,
+		func(refresh map[string]any) {
+			refresh["draft_updated_at"] = "not-a-timestamp"
+		},
+	)
+	defer server.Close()
+
+	client := mustClient(t, server, "connect.sid=synthetic-session")
+	_, err := client.UpdateDraft(
+		context.Background(),
+		postID,
+		"Synthetic update title",
+		proseMirrorWith(marker),
+		marker,
+	)
+	var updateErr *substack.UpdateError
+	if !errors.As(err, &updateErr) {
+		t.Fatalf("UpdateDraft() error = %v, want *substack.UpdateError", err)
+	}
+	if updateErr.Stage != substack.UpdateStagePreMutation ||
+		updateErr.Code != "draft_refresh_invalid" ||
+		updateErr.MutationDispatched {
+		t.Fatalf("UpdateDraft() evidence = %#v", updateErr)
+	}
+	if putCount.Load() != 0 {
+		t.Fatalf("PUT count = %d, want 0", putCount.Load())
+	}
+}
+
+func TestUpdateDraftReportsMutationUnknownStageEvidence(t *testing.T) {
+	t.Parallel()
+
+	const (
+		postID = "42424242"
+		marker = "gtme-issue:11111111-2222-4333-8444-555555555555"
+	)
+	server := updateDraftServer(t, postID, marker, func(map[string]any) {})
+	defer server.Close()
+
+	baseTransport := server.Client().Transport
+	httpClient := &http.Client{Transport: roundTripFunc(func(
+		request *http.Request,
+	) (*http.Response, error) {
+		if request.Method == http.MethodPut {
+			response, err := baseTransport.RoundTrip(request)
+			if err != nil {
+				return nil, err
+			}
+			response.Body.Close()
+			return nil, fmt.Errorf("synthetic connection reset after dispatch")
+		}
+		return baseTransport.RoundTrip(request)
+	})}
+	client, err := substack.NewClient(
+		server.URL,
+		server.URL,
+		"connect.sid=synthetic-session",
+		httpClient,
+	)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	_, err = client.UpdateDraft(
+		context.Background(),
+		postID,
+		"Synthetic update title",
+		proseMirrorWith(marker),
+		marker,
+	)
+	var updateErr *substack.UpdateError
+	if !errors.As(err, &updateErr) {
+		t.Fatalf("UpdateDraft() error = %v, want *substack.UpdateError", err)
+	}
+	if updateErr.Stage != substack.UpdateStageMutationUnknown ||
+		updateErr.Code != "update_transport_failed" ||
+		!updateErr.MutationDispatched {
+		t.Fatalf("UpdateDraft() evidence = %#v", updateErr)
+	}
+}
+
+func TestUpdateDraftReportsPostMutationVerificationStageEvidence(t *testing.T) {
+	t.Parallel()
+
+	const (
+		postID = "42424242"
+		marker = "gtme-issue:11111111-2222-4333-8444-555555555555"
+	)
+	numericPostID := mustNumericPostID(t, postID)
+	server := updateDraftServer(t, postID, marker, func(response map[string]any) {
+		response["id"] = numericPostID + 1
+	})
+	defer server.Close()
+
+	client := mustClient(t, server, "connect.sid=synthetic-session")
+	_, err := client.UpdateDraft(
+		context.Background(),
+		postID,
+		"Synthetic update title",
+		proseMirrorWith(marker),
+		marker,
+	)
+	var updateErr *substack.UpdateError
+	if !errors.As(err, &updateErr) {
+		t.Fatalf("UpdateDraft() error = %v, want *substack.UpdateError", err)
+	}
+	if updateErr.Stage != substack.UpdateStagePostMutationVerification ||
+		updateErr.Code != "update_response_invalid" ||
+		!updateErr.MutationDispatched {
+		t.Fatalf("UpdateDraft() evidence = %#v", updateErr)
 	}
 }
 
