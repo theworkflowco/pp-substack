@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -41,6 +42,25 @@ type draftByline struct {
 	IsGuest *bool       `json:"is_guest"`
 }
 
+type refreshedDraft struct {
+	draftLifecycle
+	ID             json.RawMessage `json:"id"`
+	DraftTitle     *string         `json:"draft_title"`
+	DraftBody      *string         `json:"draft_body"`
+	DraftUpdatedAt *string         `json:"draft_updated_at"`
+	DraftBylines   *[]draftByline  `json:"draftBylines"`
+}
+
+type DraftComparison struct {
+	PostID            string `json:"post_id"`
+	Status            string `json:"status"`
+	Matches           bool   `json:"matches"`
+	TitleMatches      bool   `json:"title_matches"`
+	BodyMatches       bool   `json:"body_matches"`
+	DraftUpdatedAt    string `json:"draft_updated_at"`
+	CorrelationMarker string `json:"correlation_marker"`
+}
+
 type HTTPError struct {
 	StatusCode int
 	Path       string
@@ -48,6 +68,43 @@ type HTTPError struct {
 
 func (err *HTTPError) Error() string {
 	return fmt.Sprintf("Substack returned HTTP %d at %s", err.StatusCode, err.Path)
+}
+
+type UpdateStage string
+
+const (
+	UpdateStagePreMutation              UpdateStage = "pre_mutation"
+	UpdateStageMutationUnknown          UpdateStage = "mutation_unknown"
+	UpdateStagePostMutationVerification UpdateStage = "post_mutation_verification"
+)
+
+type UpdateError struct {
+	Stage              UpdateStage
+	Code               string
+	MutationDispatched bool
+	Cause              error
+}
+
+func (err *UpdateError) Error() string {
+	return err.Cause.Error()
+}
+
+func (err *UpdateError) Unwrap() error {
+	return err.Cause
+}
+
+func updateError(
+	stage UpdateStage,
+	code string,
+	mutationDispatched bool,
+	cause error,
+) error {
+	return &UpdateError{
+		Stage:              stage,
+		Code:               code,
+		MutationDispatched: mutationDispatched,
+		Cause:              cause,
+	}
 }
 
 type Client struct {
@@ -167,115 +224,95 @@ func (client *Client) UpdateDraft(
 	correlationMarker string,
 ) (UpdatedDraft, error) {
 	if strings.TrimSpace(postID) == "" {
-		return UpdatedDraft{}, fmt.Errorf("post id is required")
+		return UpdatedDraft{}, updateError(
+			UpdateStagePreMutation,
+			"draft_input_invalid",
+			false,
+			fmt.Errorf("post id is required"),
+		)
 	}
 	if strings.TrimSpace(title) == "" {
-		return UpdatedDraft{}, fmt.Errorf("title is required")
+		return UpdatedDraft{}, updateError(
+			UpdateStagePreMutation,
+			"draft_input_invalid",
+			false,
+			fmt.Errorf("title is required"),
+		)
 	}
 	if err := ValidateCorrelationMarker(correlationMarker); err != nil {
-		return UpdatedDraft{}, err
+		return UpdatedDraft{}, updateError(
+			UpdateStagePreMutation,
+			"draft_input_invalid",
+			false,
+			err,
+		)
 	}
 	if strings.Count(proseMirrorBody, correlationMarker) != 1 {
-		return UpdatedDraft{}, fmt.Errorf(
-			"prose mirror body must contain correlation marker exactly once",
+		return UpdatedDraft{}, updateError(
+			UpdateStagePreMutation,
+			"draft_input_invalid",
+			false,
+			fmt.Errorf("prose mirror body must contain correlation marker exactly once"),
 		)
 	}
 
 	found, err := client.GetPost(ctx, postID)
 	if err != nil {
-		return UpdatedDraft{}, fmt.Errorf("update Substack draft: %w", err)
+		return UpdatedDraft{}, updateError(
+			UpdateStagePreMutation,
+			"draft_lookup_failed",
+			false,
+			fmt.Errorf("update Substack draft: %w", err),
+		)
 	}
 	if !found.Found || found.Post == nil {
-		return UpdatedDraft{}, fmt.Errorf(
-			"update Substack draft: post %q was not found",
-			postID,
+		return UpdatedDraft{}, updateError(
+			UpdateStagePreMutation,
+			"draft_ownership_failed",
+			false,
+			fmt.Errorf("update Substack draft: post %q was not found", postID),
 		)
 	}
 	if found.Post.Status != "draft" {
-		return UpdatedDraft{}, fmt.Errorf(
-			"update Substack draft: post %q has status %q, want draft",
-			postID,
-			found.Post.Status,
+		return UpdatedDraft{}, updateError(
+			UpdateStagePreMutation,
+			"draft_ownership_failed",
+			false,
+			fmt.Errorf(
+				"update Substack draft: post %q has status %q, want draft",
+				postID,
+				found.Post.Status,
+			),
 		)
 	}
 	if found.Post.CorrelationMarker != correlationMarker {
-		return UpdatedDraft{}, fmt.Errorf(
-			"update Substack draft: post %q correlation marker does not match",
-			postID,
+		return UpdatedDraft{}, updateError(
+			UpdateStagePreMutation,
+			"draft_ownership_failed",
+			false,
+			fmt.Errorf(
+				"update Substack draft: post %q correlation marker does not match",
+				postID,
+			),
 		)
 	}
 
+	current, err := client.refreshDraft(ctx, postID, correlationMarker)
+	if err != nil {
+		code := "draft_refresh_invalid"
+		var httpErr *HTTPError
+		if errors.As(err, &httpErr) {
+			code = "draft_refresh_failed"
+		}
+		return UpdatedDraft{}, updateError(
+			UpdateStagePreMutation,
+			code,
+			false,
+			fmt.Errorf("update Substack draft: %w", err),
+		)
+	}
 	endpoint := client.publicationBaseURL + "/api/v1/drafts/" +
 		url.PathEscape(postID)
-	var current struct {
-		draftLifecycle
-		ID             json.RawMessage `json:"id"`
-		DraftBody      *string         `json:"draft_body"`
-		DraftUpdatedAt *string         `json:"draft_updated_at"`
-		DraftBylines   *[]draftByline  `json:"draftBylines"`
-	}
-	if err := client.requestJSON(
-		ctx,
-		http.MethodGet,
-		endpoint,
-		nil,
-		&current,
-	); err != nil {
-		return UpdatedDraft{}, fmt.Errorf(
-			"update Substack draft: refresh draft before mutation: %w",
-			err,
-		)
-	}
-	currentID, err := parseID(current.ID)
-	if err != nil {
-		return UpdatedDraft{}, fmt.Errorf(
-			"update Substack draft: refreshed response %w",
-			err,
-		)
-	}
-	if currentID != postID {
-		return UpdatedDraft{}, fmt.Errorf(
-			"update Substack draft: refreshed response id %q does not match requested id %q",
-			currentID,
-			postID,
-		)
-	}
-	if err := validateDraftLifecycle(
-		"update Substack draft: refreshed response",
-		current.draftLifecycle,
-	); err != nil {
-		return UpdatedDraft{}, err
-	}
-	if current.DraftUpdatedAt == nil ||
-		strings.TrimSpace(*current.DraftUpdatedAt) == "" {
-		return UpdatedDraft{}, fmt.Errorf(
-			"update Substack draft: refreshed response is missing draft_updated_at",
-		)
-	}
-	if err := validateRFC3339(
-		*current.DraftUpdatedAt,
-		"draft_updated_at",
-	); err != nil {
-		return UpdatedDraft{}, fmt.Errorf(
-			"update Substack draft: refreshed response %w",
-			err,
-		)
-	}
-	if current.DraftBody == nil {
-		return UpdatedDraft{}, fmt.Errorf(
-			"update Substack draft: refreshed response is missing draft_body needed to verify correlation marker",
-		)
-	}
-	if strings.Count(*current.DraftBody, correlationMarker) != 1 {
-		return UpdatedDraft{}, fmt.Errorf(
-			"update Substack draft: refreshed response correlation marker is not present exactly once",
-		)
-	}
-	if current.DraftBylines == nil || len(*current.DraftBylines) == 0 {
-		return UpdatedDraft{}, fmt.Errorf(
-			"update Substack draft: refreshed response has no draft bylines",
-		)
-	}
 
 	type updateByline struct {
 		ID      json.Number `json:"id"`
@@ -284,22 +321,31 @@ func (client *Client) UpdateDraft(
 	bylines := make([]updateByline, len(*current.DraftBylines))
 	for index, byline := range *current.DraftBylines {
 		if byline.ID == "" {
-			return UpdatedDraft{}, fmt.Errorf(
-				"update Substack draft: refreshed response draft byline %d is missing id",
-				index,
+			return UpdatedDraft{}, updateError(
+				UpdateStagePreMutation,
+				"draft_refresh_invalid",
+				false,
+				fmt.Errorf("update Substack draft: refreshed response draft byline %d is missing id", index),
 			)
 		}
 		if _, err := strconv.ParseUint(byline.ID.String(), 10, 64); err != nil {
-			return UpdatedDraft{}, fmt.Errorf(
-				"update Substack draft: refreshed response draft byline %d has invalid id: %w",
-				index,
-				err,
+			return UpdatedDraft{}, updateError(
+				UpdateStagePreMutation,
+				"draft_refresh_invalid",
+				false,
+				fmt.Errorf(
+					"update Substack draft: refreshed response draft byline %d has invalid id: %w",
+					index,
+					err,
+				),
 			)
 		}
 		if byline.IsGuest == nil {
-			return UpdatedDraft{}, fmt.Errorf(
-				"update Substack draft: refreshed response draft byline %d is missing is_guest",
-				index,
+			return UpdatedDraft{}, updateError(
+				UpdateStagePreMutation,
+				"draft_refresh_invalid",
+				false,
+				fmt.Errorf("update Substack draft: refreshed response draft byline %d is missing is_guest", index),
 			)
 		}
 		bylines[index] = updateByline{
@@ -335,6 +381,7 @@ func (client *Client) UpdateDraft(
 		ID        json.RawMessage `json:"id"`
 		DraftBody *string         `json:"draft_body"`
 	}
+	mutationDispatched := true
 	if err := client.requestJSON(
 		ctx,
 		http.MethodPut,
@@ -342,36 +389,59 @@ func (client *Client) UpdateDraft(
 		payload,
 		&response,
 	); err != nil {
-		return UpdatedDraft{}, fmt.Errorf("update Substack draft: %w", err)
+		return UpdatedDraft{}, updateError(
+			UpdateStageMutationUnknown,
+			"update_transport_failed",
+			mutationDispatched,
+			fmt.Errorf("update Substack draft: %w", err),
+		)
 	}
 	responseID, err := parseID(response.ID)
 	if err != nil {
-		return UpdatedDraft{}, fmt.Errorf(
-			"update Substack draft response: %w",
-			err,
+		return UpdatedDraft{}, updateError(
+			UpdateStagePostMutationVerification,
+			"update_response_invalid",
+			mutationDispatched,
+			fmt.Errorf("update Substack draft response: %w", err),
 		)
 	}
 	if responseID != postID {
-		return UpdatedDraft{}, fmt.Errorf(
-			"update Substack draft response id %q does not match requested id %q",
-			responseID,
-			postID,
+		return UpdatedDraft{}, updateError(
+			UpdateStagePostMutationVerification,
+			"update_response_invalid",
+			mutationDispatched,
+			fmt.Errorf(
+				"update Substack draft response id %q does not match requested id %q",
+				responseID,
+				postID,
+			),
 		)
 	}
 	if err := validateDraftLifecycle(
 		"update Substack draft response",
 		response.draftLifecycle,
 	); err != nil {
-		return UpdatedDraft{}, err
+		return UpdatedDraft{}, updateError(
+			UpdateStagePostMutationVerification,
+			"update_response_invalid",
+			mutationDispatched,
+			err,
+		)
 	}
 	if response.DraftBody == nil {
-		return UpdatedDraft{}, fmt.Errorf(
-			"update Substack draft response is missing draft_body",
+		return UpdatedDraft{}, updateError(
+			UpdateStagePostMutationVerification,
+			"update_response_invalid",
+			mutationDispatched,
+			fmt.Errorf("update Substack draft response is missing draft_body"),
 		)
 	}
 	if strings.Count(*response.DraftBody, correlationMarker) != 1 {
-		return UpdatedDraft{}, fmt.Errorf(
-			"update Substack draft response: correlation marker did not round-trip exactly once",
+		return UpdatedDraft{}, updateError(
+			UpdateStagePostMutationVerification,
+			"update_response_invalid",
+			mutationDispatched,
+			fmt.Errorf("update Substack draft response: correlation marker did not round-trip exactly once"),
 		)
 	}
 
@@ -382,6 +452,127 @@ func (client *Client) UpdateDraft(
 		Status:            "draft",
 		CorrelationMarker: correlationMarker,
 	}, nil
+}
+
+func (client *Client) CompareDraft(
+	ctx context.Context,
+	postID string,
+	title string,
+	proseMirrorBody string,
+	correlationMarker string,
+) (DraftComparison, error) {
+	if strings.TrimSpace(postID) == "" {
+		return DraftComparison{}, fmt.Errorf("post id is required")
+	}
+	if strings.TrimSpace(title) == "" {
+		return DraftComparison{}, fmt.Errorf("title is required")
+	}
+	if err := ValidateCorrelationMarker(correlationMarker); err != nil {
+		return DraftComparison{}, err
+	}
+	if strings.Count(proseMirrorBody, correlationMarker) != 1 {
+		return DraftComparison{}, fmt.Errorf(
+			"prose mirror body must contain correlation marker exactly once",
+		)
+	}
+
+	found, err := client.GetPost(ctx, postID)
+	if err != nil {
+		return DraftComparison{}, fmt.Errorf("compare Substack draft: %w", err)
+	}
+	if !found.Found || found.Post == nil {
+		return DraftComparison{}, fmt.Errorf(
+			"compare Substack draft: post %q was not found",
+			postID,
+		)
+	}
+	if found.Post.Status != "draft" {
+		return DraftComparison{}, fmt.Errorf(
+			"compare Substack draft: post %q has status %q, want draft",
+			postID,
+			found.Post.Status,
+		)
+	}
+	if found.Post.CorrelationMarker != correlationMarker {
+		return DraftComparison{}, fmt.Errorf(
+			"compare Substack draft: post %q correlation marker does not match",
+			postID,
+		)
+	}
+
+	current, err := client.refreshDraft(ctx, postID, correlationMarker)
+	if err != nil {
+		return DraftComparison{}, fmt.Errorf("compare Substack draft: %w", err)
+	}
+	if current.DraftTitle == nil {
+		return DraftComparison{}, fmt.Errorf(
+			"compare Substack draft: refreshed response is missing draft_title",
+		)
+	}
+	titleMatches := *current.DraftTitle == title
+	bodyMatches := *current.DraftBody == proseMirrorBody
+	return DraftComparison{
+		PostID:            postID,
+		Status:            "draft",
+		Matches:           titleMatches && bodyMatches,
+		TitleMatches:      titleMatches,
+		BodyMatches:       bodyMatches,
+		DraftUpdatedAt:    *current.DraftUpdatedAt,
+		CorrelationMarker: correlationMarker,
+	}, nil
+}
+
+func (client *Client) refreshDraft(
+	ctx context.Context,
+	postID string,
+	correlationMarker string,
+) (refreshedDraft, error) {
+	endpoint := client.publicationBaseURL + "/api/v1/drafts/" +
+		url.PathEscape(postID)
+	var current refreshedDraft
+	if err := client.requestJSON(
+		ctx,
+		http.MethodGet,
+		endpoint,
+		nil,
+		&current,
+	); err != nil {
+		return refreshedDraft{}, fmt.Errorf("refresh draft before mutation: %w", err)
+	}
+	currentID, err := parseID(current.ID)
+	if err != nil {
+		return refreshedDraft{}, fmt.Errorf("refreshed response %w", err)
+	}
+	if currentID != postID {
+		return refreshedDraft{}, fmt.Errorf(
+			"refreshed response id %q does not match requested id %q",
+			currentID,
+			postID,
+		)
+	}
+	if err := validateDraftLifecycle("refreshed response", current.draftLifecycle); err != nil {
+		return refreshedDraft{}, err
+	}
+	if current.DraftUpdatedAt == nil || strings.TrimSpace(*current.DraftUpdatedAt) == "" {
+		return refreshedDraft{}, fmt.Errorf("refreshed response is missing draft_updated_at")
+	}
+	if err := validateRFC3339(*current.DraftUpdatedAt, "draft_updated_at"); err != nil {
+		return refreshedDraft{}, fmt.Errorf("refreshed response %w", err)
+	}
+	if current.DraftBody == nil {
+		return refreshedDraft{}, fmt.Errorf(
+			"refreshed response is missing draft_body needed to verify correlation marker",
+		)
+	}
+	if strings.Count(*current.DraftBody, correlationMarker) != 1 {
+		return refreshedDraft{}, fmt.Errorf(
+			"refreshed response correlation marker is not present exactly once",
+		)
+	}
+	if current.DraftBylines == nil || len(*current.DraftBylines) == 0 {
+		return refreshedDraft{}, fmt.Errorf("refreshed response has no draft bylines")
+	}
+	return current, nil
 }
 
 func validateDraftLifecycle(context string, lifecycle draftLifecycle) error {

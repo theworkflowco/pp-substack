@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -48,6 +49,44 @@ func ExitCode(err error) int {
 		}
 	}
 	return 7
+}
+
+func ErrorOutput(err error) ([]byte, bool) {
+	var updateErr *substack.UpdateError
+	if !errors.As(err, &updateErr) {
+		return nil, false
+	}
+	envelope := struct {
+		SchemaVersion      string `json:"schema_version"`
+		Stage              string `json:"stage"`
+		Code               string `json:"code"`
+		MutationDispatched bool   `json:"mutation_dispatched"`
+		Message            string `json:"message"`
+	}{
+		SchemaVersion:      "pp-substack-update-error-v1",
+		Stage:              string(updateErr.Stage),
+		Code:               updateErr.Code,
+		MutationDispatched: updateErr.MutationDispatched,
+		Message:            safeUpdateErrorMessage(updateErr.Stage),
+	}
+	encoded, marshalErr := json.Marshal(envelope)
+	if marshalErr != nil {
+		return nil, false
+	}
+	return encoded, true
+}
+
+func safeUpdateErrorMessage(stage substack.UpdateStage) string {
+	switch stage {
+	case substack.UpdateStagePreMutation:
+		return "Substack draft update failed before mutation"
+	case substack.UpdateStageMutationUnknown:
+		return "Substack draft update result is unknown"
+	case substack.UpdateStagePostMutationVerification:
+		return "Substack draft update response could not be verified"
+	default:
+		return "Substack draft update failed"
+	}
 }
 
 func requiredFlag(name string) error {

@@ -27,6 +27,7 @@ type Post struct {
 	Status            string  `json:"status"`
 	ScheduledAt       *string `json:"scheduled_at"`
 	PublishedAt       *string `json:"published_at"`
+	DraftUpdatedAt    *string `json:"draft_updated_at"`
 	CorrelationMarker string  `json:"correlation_marker"`
 }
 
@@ -36,16 +37,17 @@ type Found struct {
 }
 
 type rawPost struct {
-	ID            json.RawMessage `json:"id"`
-	DraftBody     string          `json:"draft_body"`
-	BodyHTML      string          `json:"body_html"`
-	BodyJSON      json.RawMessage `json:"body_json"`
-	Body          string          `json:"body"`
-	PostDate      *string         `json:"post_date"`
-	CanonicalURL  *string         `json:"canonical_url"`
-	Slug          *string         `json:"slug"`
-	TriggerAt     *string         `json:"trigger_at"`
-	PostSchedules []struct {
+	ID             json.RawMessage `json:"id"`
+	DraftBody      string          `json:"draft_body"`
+	DraftUpdatedAt *string         `json:"draft_updated_at"`
+	BodyHTML       string          `json:"body_html"`
+	BodyJSON       json.RawMessage `json:"body_json"`
+	Body           string          `json:"body"`
+	PostDate       *string         `json:"post_date"`
+	CanonicalURL   *string         `json:"canonical_url"`
+	Slug           *string         `json:"slug"`
+	TriggerAt      *string         `json:"trigger_at"`
+	PostSchedules  []struct {
 		TriggerAt *string `json:"trigger_at"`
 	} `json:"postSchedules"`
 }
@@ -561,6 +563,16 @@ func (client *Client) normalizePost(raw rawPost) (Post, error) {
 		status = "scheduled"
 		scheduledAt = schedule
 	}
+	var draftUpdatedAt *string
+	if status != "published" && raw.DraftBody != "" {
+		if raw.DraftUpdatedAt == nil || strings.TrimSpace(*raw.DraftUpdatedAt) == "" {
+			return Post{}, fmt.Errorf("draft_updated_at is required for draft content")
+		}
+		if err := validateRFC3339(*raw.DraftUpdatedAt, "draft_updated_at"); err != nil {
+			return Post{}, err
+		}
+		draftUpdatedAt = raw.DraftUpdatedAt
+	}
 
 	return Post{
 		PostID:            id,
@@ -568,6 +580,7 @@ func (client *Client) normalizePost(raw rawPost) (Post, error) {
 		Status:            status,
 		ScheduledAt:       scheduledAt,
 		PublishedAt:       publishedAt,
+		DraftUpdatedAt:    draftUpdatedAt,
 		CorrelationMarker: marker,
 	}, nil
 }
