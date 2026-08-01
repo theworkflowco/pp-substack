@@ -40,9 +40,16 @@ func ToProseMirror(source string, correlationMarker string) (string, error) {
 			if err != nil {
 				return "", err
 			}
+			// Substack renders low heading levels very large in posts and
+			// emails; the publication's approved hierarchy steps every
+			// Markdown heading down one level (## -> h3, ### -> h4).
+			rendered := level + 1
+			if rendered > 6 {
+				rendered = 6
+			}
 			content = append(content, node{
 				Type:    "heading",
-				Attrs:   map[string]any{"level": level},
+				Attrs:   map[string]any{"level": rendered},
 				Content: inline,
 			})
 			index++
