@@ -52,11 +52,11 @@ func TestToProseMirrorPreservesNewsletterStructureAndMarkerOnce(t *testing.T) {
 	if len(document.Content) != 4 {
 		t.Fatalf("top-level node count = %d, want 4", len(document.Content))
 	}
-	if document.Content[0].Type != "heading" || document.Content[0].Attrs.Level != 1 {
-		t.Fatalf("first node = %#v, want level-1 heading", document.Content[0])
+	if document.Content[0].Type != "heading" || document.Content[0].Attrs.Level != 2 {
+		t.Fatalf("first node = %#v, want level-2 heading", document.Content[0])
 	}
-	if document.Content[1].Type != "heading" || document.Content[1].Attrs.Level != 2 {
-		t.Fatalf("second node = %#v, want level-2 heading", document.Content[1])
+	if document.Content[1].Type != "heading" || document.Content[1].Attrs.Level != 3 {
+		t.Fatalf("second node = %#v, want level-3 heading", document.Content[1])
 	}
 	if document.Content[2].Type != "bullet_list" {
 		t.Fatalf("third node type = %q, want bullet_list", document.Content[2].Type)
@@ -124,7 +124,7 @@ func TestToProseMirrorPreservesExactComposerMarkdownSubset(t *testing.T) {
 	var foundItalicCadence bool
 	var foundRule bool
 	for _, block := range document.Content {
-		if block.Type == "heading" && block.Attrs["level"] == float64(4) {
+		if block.Type == "heading" && block.Attrs["level"] == float64(5) {
 			foundLevelFour = true
 		}
 		if block.Type == "horizontal_rule" {
@@ -139,7 +139,7 @@ func TestToProseMirrorPreservesExactComposerMarkdownSubset(t *testing.T) {
 		}
 	}
 	if !foundLevelFour {
-		t.Error("composer level-four listing heading was not preserved")
+		t.Error("composer level-four listing heading was not demoted to level five")
 	}
 	if !foundItalicCadence {
 		t.Error("composer italic cadence line was not preserved")
