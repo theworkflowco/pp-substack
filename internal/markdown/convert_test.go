@@ -179,3 +179,155 @@ func TestToProseMirrorConvertsExactSmallComposerSnapshot(t *testing.T) {
 		t.Fatalf("composer structure missing from rendered body: %s", body)
 	}
 }
+
+func TestToProseMirrorConvertsBlockquoteToCalloutBlock(t *testing.T) {
+	t.Parallel()
+
+	const marker = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
+	input := strings.Join([]string{
+		"# The Shortlist",
+		"",
+		"> **[GTM Engineer](https://jobs.example/role)** @ [Acme](https://acme.example) · Remote",
+		">",
+		"> A rare systems mandate with real ownership.",
+		"",
+		"Issue reference: " + marker,
+		"",
+	}, "\n")
+
+	body, err := markdown.ToProseMirror(input, marker)
+	if err != nil {
+		t.Fatalf("ToProseMirror() error = %v", err)
+	}
+
+	var document struct {
+		Type    string `json:"type"`
+		Content []struct {
+			Type    string `json:"type"`
+			Content []struct {
+				Type    string `json:"type"`
+				Content []struct {
+					Type  string `json:"type"`
+					Text  string `json:"text"`
+					Marks []struct {
+						Type string `json:"type"`
+					} `json:"marks"`
+				} `json:"content"`
+			} `json:"content"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(body), &document); err != nil {
+		t.Fatalf("body is not JSON: %v", err)
+	}
+	if len(document.Content) != 3 {
+		t.Fatalf("top-level node count = %d, want 3; body = %s", len(document.Content), body)
+	}
+	callout := document.Content[1]
+	if callout.Type != "calloutBlock" {
+		t.Fatalf("second node type = %q, want calloutBlock", callout.Type)
+	}
+	if len(callout.Content) != 2 {
+		t.Fatalf("callout paragraph count = %d, want 2", len(callout.Content))
+	}
+	for index, paragraph := range callout.Content {
+		if paragraph.Type != "paragraph" {
+			t.Fatalf("callout child %d type = %q, want paragraph", index, paragraph.Type)
+		}
+	}
+	first := callout.Content[0].Content
+	if len(first) == 0 || first[0].Text != "GTM Engineer" {
+		t.Fatalf("first callout inline = %#v, want linked bold title", first)
+	}
+	sawStrong, sawLink := false, false
+	for _, markEntry := range first[0].Marks {
+		if markEntry.Type == "strong" {
+			sawStrong = true
+		}
+		if markEntry.Type == "link" {
+			sawLink = true
+		}
+	}
+	if !sawStrong || !sawLink {
+		t.Fatalf("first inline marks = %#v, want strong+link", first[0].Marks)
+	}
+}
+
+func TestToProseMirrorRejectsUnclosedBlockquoteInline(t *testing.T) {
+	t.Parallel()
+
+	const marker = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
+	input := "> **broken\n\nIssue reference: " + marker + "\n"
+	if _, err := markdown.ToProseMirror(input, marker); err == nil {
+		t.Fatal("ToProseMirror() error = nil, want inline parse failure")
+	}
+}
+
+func TestToProseMirrorConvertsSubscribeDirective(t *testing.T) {
+	t.Parallel()
+
+	const marker = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
+	input := strings.Join([]string{
+		"# The Shortlist",
+		"",
+		"::subscribe:: Thanks for reading The Shortlist! Subscribe for free to receive new posts and support my work.",
+		"",
+		"Issue reference: " + marker,
+		"",
+	}, "\n")
+
+	body, err := markdown.ToProseMirror(input, marker)
+	if err != nil {
+		t.Fatalf("ToProseMirror() error = %v", err)
+	}
+
+	var document struct {
+		Content []struct {
+			Type  string `json:"type"`
+			Attrs struct {
+				URL      string `json:"url"`
+				Text     string `json:"text"`
+				Language string `json:"language"`
+			} `json:"attrs"`
+			Content []struct {
+				Type    string `json:"type"`
+				Content []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"content"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(body), &document); err != nil {
+		t.Fatalf("body is not JSON: %v", err)
+	}
+	if len(document.Content) != 3 {
+		t.Fatalf("top-level node count = %d, want 3; body = %s", len(document.Content), body)
+	}
+	widget := document.Content[1]
+	if widget.Type != "subscribeWidget" {
+		t.Fatalf("second node type = %q, want subscribeWidget", widget.Type)
+	}
+	if widget.Attrs.URL != "%%checkout_url%%" ||
+		widget.Attrs.Text != "Subscribe" ||
+		widget.Attrs.Language != "en" {
+		t.Fatalf("widget attrs = %#v, want checkout URL/Subscribe/en", widget.Attrs)
+	}
+	if len(widget.Content) != 1 || widget.Content[0].Type != "ctaCaption" {
+		t.Fatalf("widget content = %#v, want single ctaCaption", widget.Content)
+	}
+	caption := widget.Content[0].Content
+	if len(caption) != 1 || caption[0].Type != "text" ||
+		!strings.HasPrefix(caption[0].Text, "Thanks for reading The Shortlist!") {
+		t.Fatalf("caption inline = %#v, want plain caption text", caption)
+	}
+}
+
+func TestToProseMirrorRejectsSubscribeDirectiveWithoutCaption(t *testing.T) {
+	t.Parallel()
+
+	const marker = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
+	input := "::subscribe::\n\nIssue reference: " + marker + "\n"
+	if _, err := markdown.ToProseMirror(input, marker); err == nil {
+		t.Fatal("ToProseMirror() error = nil, want missing caption failure")
+	}
+}

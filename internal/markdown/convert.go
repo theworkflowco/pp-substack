@@ -55,6 +55,72 @@ func ToProseMirror(source string, correlationMarker string) (string, error) {
 			continue
 		}
 
+		if caption, ok := strings.CutPrefix(line, "::subscribe::"); ok {
+			caption = strings.TrimSpace(caption)
+			if caption == "" {
+				return "", fmt.Errorf("subscribe directive requires a caption")
+			}
+			inline, err := parseInline(caption)
+			if err != nil {
+				return "", err
+			}
+			content = append(content, node{
+				Type: "subscribeWidget",
+				Attrs: map[string]any{
+					"url":      "%%checkout_url%%",
+					"text":     "Subscribe",
+					"language": "en",
+				},
+				Content: []node{{Type: "ctaCaption", Content: inline}},
+			})
+			index++
+			continue
+		}
+
+		if strings.HasPrefix(line, ">") {
+			paragraphs := make([]node, 0)
+			var pending []string
+			flush := func() error {
+				if len(pending) == 0 {
+					return nil
+				}
+				inline, err := parseInline(strings.Join(pending, " "))
+				if err != nil {
+					return err
+				}
+				paragraphs = append(paragraphs, node{
+					Type:    "paragraph",
+					Attrs:   map[string]any{"textAlign": nil},
+					Content: inline,
+				})
+				pending = nil
+				return nil
+			}
+			for index < len(lines) {
+				quoted := strings.TrimSpace(lines[index])
+				if !strings.HasPrefix(quoted, ">") {
+					break
+				}
+				text := strings.TrimSpace(strings.TrimPrefix(quoted, ">"))
+				if text == "" {
+					if err := flush(); err != nil {
+						return "", err
+					}
+				} else {
+					pending = append(pending, text)
+				}
+				index++
+			}
+			if err := flush(); err != nil {
+				return "", err
+			}
+			if len(paragraphs) == 0 {
+				return "", fmt.Errorf("blockquote must contain text")
+			}
+			content = append(content, node{Type: "calloutBlock", Content: paragraphs})
+			continue
+		}
+
 		if strings.HasPrefix(line, "- ") {
 			items := make([]node, 0)
 			for index < len(lines) {
@@ -89,6 +155,8 @@ func ToProseMirror(source string, correlationMarker string) (string, error) {
 			}
 			if _, _, ok := heading(next); ok ||
 				strings.HasPrefix(next, "- ") ||
+				strings.HasPrefix(next, ">") ||
+				strings.HasPrefix(next, "::subscribe::") ||
 				next == "---" {
 				break
 			}
@@ -135,22 +203,22 @@ func parseInline(text string) ([]node, error) {
 			if end < 0 {
 				return nil, fmt.Errorf("unclosed strong emphasis in Markdown")
 			}
-			nodes = append(nodes, node{
-				Type:  "text",
-				Text:  unescape(text[2 : 2+end]),
-				Marks: []mark{{Type: "strong"}},
-			})
+			inner, err := parseInlineWithMark(text[2:2+end], mark{Type: "strong"})
+			if err != nil {
+				return nil, err
+			}
+			nodes = append(nodes, inner...)
 			text = text[2+end+2:]
 		case strings.HasPrefix(text, "_"):
 			end := indexUnescaped(text[1:], "_")
 			if end < 0 {
 				return nil, fmt.Errorf("unclosed emphasis in Markdown")
 			}
-			nodes = append(nodes, node{
-				Type:  "text",
-				Text:  unescape(text[1 : 1+end]),
-				Marks: []mark{{Type: "em"}},
-			})
+			inner, err := parseInlineWithMark(text[1:1+end], mark{Type: "em"})
+			if err != nil {
+				return nil, err
+			}
+			nodes = append(nodes, inner...)
 			text = text[1+end+1:]
 		case strings.HasPrefix(text, "["):
 			labelEnd := strings.Index(text, "](")
@@ -187,6 +255,17 @@ func parseInline(text string) ([]node, error) {
 		}
 	}
 	return nodes, nil
+}
+
+func parseInlineWithMark(text string, outer mark) ([]node, error) {
+	inner, err := parseInline(text)
+	if err != nil {
+		return nil, err
+	}
+	for index := range inner {
+		inner[index].Marks = append(inner[index].Marks, outer)
+	}
+	return inner, nil
 }
 
 func nextInlineStart(text string) int {
