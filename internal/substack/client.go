@@ -46,6 +46,7 @@ type refreshedDraft struct {
 	draftLifecycle
 	ID             json.RawMessage `json:"id"`
 	DraftTitle     *string         `json:"draft_title"`
+	DraftSubtitle  *string         `json:"draft_subtitle"`
 	DraftBody      *string         `json:"draft_body"`
 	DraftUpdatedAt *string         `json:"draft_updated_at"`
 	DraftBylines   *[]draftByline  `json:"draftBylines"`
@@ -375,6 +376,13 @@ func (client *Client) UpdateDraft(
 		bylines = &converted
 	}
 
+	// The subtitle is operator-owned, so echo back whatever the draft already
+	// carries instead of clearing it on every sync.
+	subtitle := ""
+	if current.DraftSubtitle != nil {
+		subtitle = *current.DraftSubtitle
+	}
+
 	payload := struct {
 		DetectLanguage       bool            `json:"detect_language"`
 		DraftBody            string          `json:"draft_body"`
@@ -391,7 +399,7 @@ func (client *Client) UpdateDraft(
 		DetectLanguage: true,
 		DraftBody:      proseMirrorBody,
 		DraftBylines:   bylines,
-		DraftSubtitle:  "",
+		DraftSubtitle:  subtitle,
 		DraftTitle:     title,
 		LastUpdatedAt:  *current.DraftUpdatedAt,
 		SectionChosen:  false,
