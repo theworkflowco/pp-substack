@@ -243,8 +243,8 @@ func parseInline(text string) ([]node, error) {
 				target = strings.TrimSuffix(strings.TrimPrefix(target, "<"), ">")
 			}
 			parsed, err := url.Parse(target)
-			if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
-				return nil, fmt.Errorf("Markdown link must use an absolute HTTP(S) URL")
+			if err != nil || !isAllowedLinkTarget(parsed) {
+				return nil, fmt.Errorf("Markdown link must use an absolute HTTP(S) or mailto URL")
 			}
 			nodes = append(nodes, node{
 				Type: "text",
@@ -262,6 +262,19 @@ func parseInline(text string) ([]node, error) {
 		}
 	}
 	return nodes, nil
+}
+
+// isAllowedLinkTarget keeps the link allowlist narrow: absolute HTTP(S) URLs
+// with a host, and mailto URLs whose address (the opaque part) is non-empty.
+func isAllowedLinkTarget(parsed *url.URL) bool {
+	switch parsed.Scheme {
+	case "http", "https":
+		return parsed.Host != ""
+	case "mailto":
+		return parsed.Opaque != ""
+	default:
+		return false
+	}
 }
 
 func parseInlineWithMark(text string, outer mark) ([]node, error) {
