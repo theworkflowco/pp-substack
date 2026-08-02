@@ -331,3 +331,104 @@ func TestToProseMirrorRejectsSubscribeDirectiveWithoutCaption(t *testing.T) {
 		t.Fatal("ToProseMirror() error = nil, want missing caption failure")
 	}
 }
+
+func TestToProseMirrorConvertsMailtoLink(t *testing.T) {
+	t.Parallel()
+
+	const marker = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
+	const address = "mailto:joe@gtmengineersearch.com"
+	input := strings.Join([]string{
+		"# The Shortlist",
+		"",
+		"Reply to [joe@gtmengineersearch.com](" + address + ") anytime.",
+		"",
+		"Issue reference: " + marker,
+		"",
+	}, "\n")
+
+	body, err := markdown.ToProseMirror(input, marker)
+	if err != nil {
+		t.Fatalf("ToProseMirror() error = %v", err)
+	}
+
+	var document struct {
+		Content []struct {
+			Type    string `json:"type"`
+			Content []struct {
+				Type  string `json:"type"`
+				Text  string `json:"text"`
+				Marks []struct {
+					Type  string `json:"type"`
+					Attrs struct {
+						Href string `json:"href"`
+					} `json:"attrs"`
+				} `json:"marks"`
+			} `json:"content"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(body), &document); err != nil {
+		t.Fatalf("body is not JSON: %v", err)
+	}
+	if len(document.Content) != 3 {
+		t.Fatalf("top-level node count = %d, want 3; body = %s", len(document.Content), body)
+	}
+
+	var linked *struct {
+		Type  string `json:"type"`
+		Text  string `json:"text"`
+		Marks []struct {
+			Type  string `json:"type"`
+			Attrs struct {
+				Href string `json:"href"`
+			} `json:"attrs"`
+		} `json:"marks"`
+	}
+	for index, inline := range document.Content[1].Content {
+		for _, markEntry := range inline.Marks {
+			if markEntry.Type == "link" {
+				linked = &document.Content[1].Content[index]
+			}
+		}
+	}
+	if linked == nil {
+		t.Fatalf("paragraph inline = %#v, want a link mark", document.Content[1].Content)
+	}
+	if linked.Type != "text" || linked.Text != "joe@gtmengineersearch.com" {
+		t.Fatalf("linked node = %#v, want text node with the address label", linked)
+	}
+	if len(linked.Marks) != 1 || linked.Marks[0].Attrs.Href != address {
+		t.Fatalf("linked marks = %#v, want single link mark with href %q", linked.Marks, address)
+	}
+}
+
+func TestToProseMirrorRejectsLinkTargetsOutsideAllowedSchemes(t *testing.T) {
+	t.Parallel()
+
+	const marker = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
+	cases := []struct {
+		name   string
+		target string
+	}{
+		{name: "mailto without address", target: "mailto:"},
+		{name: "root relative", target: "/apply"},
+		{name: "document relative", target: "apply.html"},
+		{name: "protocol relative", target: "//jobs.example/apply"},
+		{name: "javascript", target: "javascript:alert(1)"},
+		{name: "ftp", target: "ftp://files.example/list"},
+		{name: "http without host", target: "https:///apply"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			input := "[Apply now](" + testCase.target + ")\n\nIssue reference: " + marker + "\n"
+			_, err := markdown.ToProseMirror(input, marker)
+			if err == nil {
+				t.Fatalf("ToProseMirror(%q) error = nil, want rejected link target", testCase.target)
+			}
+			if !strings.Contains(err.Error(), "HTTP(S) or mailto") {
+				t.Fatalf("error = %v, want the allowed-scheme message", err)
+			}
+		})
+	}
+}

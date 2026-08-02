@@ -141,8 +141,9 @@ contract error.
 The correlation marker must be a visible `gtme-issue:<uuid>` token that occurs
 exactly once in the Markdown. The converter supports heading levels 1–6,
 paragraphs, bullet lists, strong and italic emphasis, horizontal rules,
-absolute HTTP(S) links, HTML entities, and Markdown escapes used by the GTME
-newsletter composer.
+absolute HTTP(S) and `mailto:` links, HTML entities, and Markdown escapes
+used by the GTME newsletter composer. Every other link scheme, and any
+relative URL, is rejected.
 
 ## Agent Usage
 
