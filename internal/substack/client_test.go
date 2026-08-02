@@ -439,6 +439,83 @@ func TestUpdateDraftRejectsConflictingRefreshBylineRepresentations(t *testing.T)
 	}
 }
 
+func TestUpdateDraftPreservesRefreshedDraftSubtitle(t *testing.T) {
+	t.Parallel()
+
+	const (
+		postID = "42424242"
+		marker = "gtme-issue:11111111-2222-4333-8444-555555555555"
+	)
+	for _, test := range []struct {
+		name          string
+		mutateRefresh func(map[string]any)
+		wantSubtitle  string
+	}{
+		{
+			name: "operator subtitle survives the sync",
+			mutateRefresh: func(refresh map[string]any) {
+				refresh["draft_subtitle"] = "Roles at Acme, Globex"
+			},
+			wantSubtitle: "Roles at Acme, Globex",
+		},
+		{
+			name:          "absent subtitle stays empty",
+			mutateRefresh: func(map[string]any) {},
+			wantSubtitle:  "",
+		},
+		{
+			name: "null subtitle stays empty",
+			mutateRefresh: func(refresh map[string]any) {
+				refresh["draft_subtitle"] = nil
+			},
+			wantSubtitle: "",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			server, putCount := updateDraftRefreshFailureServer(
+				t,
+				postID,
+				marker,
+				test.mutateRefresh,
+				func(payload map[string]json.RawMessage) {
+					raw, found := payload["draft_subtitle"]
+					if !found {
+						t.Fatal("PUT payload is missing draft_subtitle")
+					}
+					var subtitle string
+					if err := json.Unmarshal(raw, &subtitle); err != nil {
+						t.Fatalf("decode PUT draft_subtitle: %v", err)
+					}
+					if subtitle != test.wantSubtitle {
+						t.Errorf(
+							"PUT draft_subtitle = %q, want %q",
+							subtitle,
+							test.wantSubtitle,
+						)
+					}
+				},
+			)
+			defer server.Close()
+
+			client := mustClient(t, server, "connect.sid=synthetic-session")
+			if _, err := client.UpdateDraft(
+				context.Background(),
+				postID,
+				"Synthetic update title",
+				proseMirrorWith(marker),
+				marker,
+			); err != nil {
+				t.Fatalf("UpdateDraft() error = %v", err)
+			}
+			if putCount.Load() != 1 {
+				t.Fatalf("PUT count = %d, want 1", putCount.Load())
+			}
+		})
+	}
+}
+
 func TestUpdateDraftReportsMutationUnknownStageEvidence(t *testing.T) {
 	t.Parallel()
 
