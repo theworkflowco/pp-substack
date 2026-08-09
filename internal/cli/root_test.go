@@ -947,26 +947,27 @@ func TestExitCodeClassifiesAuthRemoteAndContractFailures(t *testing.T) {
 }
 
 type fakeService struct {
-	createResult  substack.Draft
-	createTitle   string
-	createBody    string
-	updateResult  substack.UpdatedDraft
-	updateCalls   int
-	updatePostID  string
-	updateTitle   string
-	updateBody    string
-	updateMarker  string
-	updateError   error
-	compareResult substack.DraftComparison
-	compareCalls  int
-	comparePostID string
-	compareTitle  string
-	compareBody   string
-	compareMarker string
-	findResult    substack.Found
-	findError     error
-	getResult     substack.Found
-	getError      error
+	createResult   substack.Draft
+	createTitle    string
+	createBody     string
+	updateResult   substack.UpdatedDraft
+	updateCalls    int
+	updatePostID   string
+	updateTitle    string
+	updateSubtitle *string
+	updateBody     string
+	updateMarker   string
+	updateError    error
+	compareResult  substack.DraftComparison
+	compareCalls   int
+	comparePostID  string
+	compareTitle   string
+	compareBody    string
+	compareMarker  string
+	findResult     substack.Found
+	findError      error
+	getResult      substack.Found
+	getError       error
 }
 
 func (fake *fakeService) CreateDraft(
@@ -984,12 +985,14 @@ func (fake *fakeService) UpdateDraft(
 	_ context.Context,
 	postID string,
 	title string,
+	subtitle *string,
 	body string,
 	correlationMarker string,
 ) (substack.UpdatedDraft, error) {
 	fake.updateCalls++
 	fake.updatePostID = postID
 	fake.updateTitle = title
+	fake.updateSubtitle = subtitle
 	fake.updateBody = body
 	fake.updateMarker = correlationMarker
 	return fake.updateResult, fake.updateError

@@ -235,6 +235,7 @@ func (client *Client) UpdateDraft(
 	ctx context.Context,
 	postID string,
 	title string,
+	subtitle *string,
 	proseMirrorBody string,
 	correlationMarker string,
 ) (UpdatedDraft, error) {
@@ -376,11 +377,16 @@ func (client *Client) UpdateDraft(
 		bylines = &converted
 	}
 
-	// The subtitle is operator-owned, so echo back whatever the draft already
-	// carries instead of clearing it on every sync.
-	subtitle := ""
+	// A nil subtitle is not "no subtitle": it means the caller does not author
+	// one, so echo back whatever the draft already carries rather than clearing
+	// it. A non-nil subtitle is authored upstream and replaces it, and the
+	// empty string is the deliberate way to clear one.
+	resolvedSubtitle := ""
 	if current.DraftSubtitle != nil {
-		subtitle = *current.DraftSubtitle
+		resolvedSubtitle = *current.DraftSubtitle
+	}
+	if subtitle != nil {
+		resolvedSubtitle = *subtitle
 	}
 
 	payload := struct {
@@ -399,7 +405,7 @@ func (client *Client) UpdateDraft(
 		DetectLanguage: true,
 		DraftBody:      proseMirrorBody,
 		DraftBylines:   bylines,
-		DraftSubtitle:  subtitle,
+		DraftSubtitle:  resolvedSubtitle,
 		DraftTitle:     title,
 		LastUpdatedAt:  *current.DraftUpdatedAt,
 		SectionChosen:  false,

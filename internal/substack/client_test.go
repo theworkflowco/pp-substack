@@ -85,6 +85,7 @@ func TestUpdateDraftRejectsInvalidInputMarkerBeforeNetwork(t *testing.T) {
 				context.Background(),
 				"42424242",
 				"Synthetic update title",
+				nil,
 				test.body,
 				marker,
 			)
@@ -153,6 +154,7 @@ func TestUpdateDraftRejectsChangedMarkerOnFinalRefresh(t *testing.T) {
 				context.Background(),
 				postID,
 				"Synthetic update title",
+				nil,
 				proseMirrorWith(marker),
 				marker,
 			)
@@ -191,6 +193,7 @@ func TestUpdateDraftRejectsMalformedRefreshTimestamp(t *testing.T) {
 		context.Background(),
 		postID,
 		"Synthetic update title",
+		nil,
 		proseMirrorWith(marker),
 		marker,
 	)
@@ -227,6 +230,7 @@ func TestUpdateDraftReportsPreMutationStageEvidence(t *testing.T) {
 		context.Background(),
 		postID,
 		"Synthetic update title",
+		nil,
 		proseMirrorWith(marker),
 		marker,
 	)
@@ -311,6 +315,7 @@ func TestUpdateDraftReportsSpecificRefreshFailureCodes(t *testing.T) {
 				context.Background(),
 				postID,
 				"Synthetic update title",
+				nil,
 				proseMirrorWith(marker),
 				marker,
 			)
@@ -358,6 +363,7 @@ func TestUpdateDraftOmitsUndisclosedRefreshBylines(t *testing.T) {
 		context.Background(),
 		postID,
 		"Synthetic update title",
+		nil,
 		proseMirrorWith(marker),
 		marker,
 	); err != nil {
@@ -391,6 +397,7 @@ func TestUpdateDraftAcceptsSnakeCaseRefreshBylines(t *testing.T) {
 		context.Background(),
 		postID,
 		"Synthetic update title",
+		nil,
 		proseMirrorWith(marker),
 		marker,
 	); err != nil {
@@ -425,6 +432,7 @@ func TestUpdateDraftRejectsConflictingRefreshBylineRepresentations(t *testing.T)
 		context.Background(),
 		postID,
 		"Synthetic update title",
+		nil,
 		proseMirrorWith(marker),
 		marker,
 	)
@@ -436,6 +444,101 @@ func TestUpdateDraftRejectsConflictingRefreshBylineRepresentations(t *testing.T)
 	}
 	if putCount.Load() != 0 {
 		t.Fatalf("PUT count = %d, want 0", putCount.Load())
+	}
+}
+
+func TestUpdateDraftSetsAuthoredSubtitle(t *testing.T) {
+	t.Parallel()
+
+	const (
+		postID = "42424242"
+		marker = "gtme-issue:11111111-2222-4333-8444-555555555555"
+	)
+	// A nil subtitle preserves whatever the draft carries, which is the
+	// behaviour operator-set subtitles have relied on. A non-nil one is
+	// authored upstream in Git and wins — including the empty string, which is
+	// how an existing subtitle is deliberately cleared rather than inherited.
+	authored := func(value string) *string { return &value }
+	for _, test := range []struct {
+		name          string
+		mutateRefresh func(map[string]any)
+		subtitle      *string
+		wantSubtitle  string
+	}{
+		{
+			name: "authored subtitle replaces the one already on the draft",
+			mutateRefresh: func(refresh map[string]any) {
+				refresh["draft_subtitle"] = "Roles at Acme, Globex"
+			},
+			subtitle:     authored("Roles at Zendesk, Decagon, plus 26 more"),
+			wantSubtitle: "Roles at Zendesk, Decagon, plus 26 more",
+		},
+		{
+			name:          "authored subtitle sets one where the draft had none",
+			mutateRefresh: func(map[string]any) {},
+			subtitle:      authored("Roles at Zendesk, plus 26 more"),
+			wantSubtitle:  "Roles at Zendesk, plus 26 more",
+		},
+		{
+			name: "an empty authored subtitle clears the existing one",
+			mutateRefresh: func(refresh map[string]any) {
+				refresh["draft_subtitle"] = "Roles at Acme, Globex"
+			},
+			subtitle:     authored(""),
+			wantSubtitle: "",
+		},
+		{
+			name: "a nil subtitle still preserves the existing one",
+			mutateRefresh: func(refresh map[string]any) {
+				refresh["draft_subtitle"] = "Roles at Acme, Globex"
+			},
+			subtitle:     nil,
+			wantSubtitle: "Roles at Acme, Globex",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			server, putCount := updateDraftRefreshFailureServer(
+				t,
+				postID,
+				marker,
+				test.mutateRefresh,
+				func(payload map[string]json.RawMessage) {
+					raw, found := payload["draft_subtitle"]
+					if !found {
+						t.Fatal("PUT payload is missing draft_subtitle")
+					}
+					var subtitle string
+					if err := json.Unmarshal(raw, &subtitle); err != nil {
+						t.Fatalf("decode PUT draft_subtitle: %v", err)
+					}
+					if subtitle != test.wantSubtitle {
+						t.Errorf(
+							"PUT draft_subtitle = %q, want %q",
+							subtitle,
+							test.wantSubtitle,
+						)
+					}
+				},
+			)
+			defer server.Close()
+
+			client := mustClient(t, server, "connect.sid=synthetic-session")
+			if _, err := client.UpdateDraft(
+				context.Background(),
+				postID,
+				"Synthetic update title",
+				test.subtitle,
+				proseMirrorWith(marker),
+				marker,
+			); err != nil {
+				t.Fatalf("UpdateDraft() error = %v", err)
+			}
+			if putCount.Load() != 1 {
+				t.Fatalf("PUT count = %d, want 1", putCount.Load())
+			}
+		})
 	}
 }
 
@@ -504,6 +607,7 @@ func TestUpdateDraftPreservesRefreshedDraftSubtitle(t *testing.T) {
 				context.Background(),
 				postID,
 				"Synthetic update title",
+				nil,
 				proseMirrorWith(marker),
 				marker,
 			); err != nil {
@@ -553,6 +657,7 @@ func TestUpdateDraftReportsMutationUnknownStageEvidence(t *testing.T) {
 		context.Background(),
 		postID,
 		"Synthetic update title",
+		nil,
 		proseMirrorWith(marker),
 		marker,
 	)
@@ -585,6 +690,7 @@ func TestUpdateDraftReportsPostMutationVerificationStageEvidence(t *testing.T) {
 		context.Background(),
 		postID,
 		"Synthetic update title",
+		nil,
 		proseMirrorWith(marker),
 		marker,
 	)
@@ -953,6 +1059,7 @@ func TestUpdateDraftSendsObservedRequestAndReturnsDraft(t *testing.T) {
 		context.Background(),
 		postID,
 		title,
+		nil,
 		body,
 		marker,
 	)
@@ -1018,6 +1125,7 @@ func TestUpdateDraftRefusesScheduledPostBeforeMutation(t *testing.T) {
 		context.Background(),
 		postID,
 		"Synthetic update title",
+		nil,
 		proseMirrorWith(marker),
 		marker,
 	)
@@ -1074,6 +1182,7 @@ func TestUpdateDraftRefusesPublishedPostBeforeMutation(t *testing.T) {
 		context.Background(),
 		postID,
 		"Synthetic update title",
+		nil,
 		proseMirrorWith(marker),
 		marker,
 	)
@@ -1113,6 +1222,7 @@ func TestUpdateDraftRequiresMarkerToRoundTripExactlyOnce(t *testing.T) {
 				context.Background(),
 				postID,
 				"Synthetic update title",
+				nil,
 				proseMirrorWith(marker),
 				marker,
 			)
@@ -1141,6 +1251,7 @@ func TestUpdateDraftRejectsResponseForDifferentPost(t *testing.T) {
 		context.Background(),
 		postID,
 		"Synthetic update title",
+		nil,
 		proseMirrorWith(marker),
 		marker,
 	)
@@ -1167,6 +1278,7 @@ func TestUpdateDraftRejectsNonDraftResponse(t *testing.T) {
 		context.Background(),
 		postID,
 		"Synthetic update title",
+		nil,
 		proseMirrorWith(marker),
 		marker,
 	)

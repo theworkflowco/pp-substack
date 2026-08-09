@@ -30,6 +30,7 @@ type Service interface {
 		ctx context.Context,
 		postID string,
 		title string,
+		subtitle *string,
 		proseMirrorBody string,
 		correlationMarker string,
 	) (substack.UpdatedDraft, error)
@@ -256,12 +257,13 @@ func newDraftUpdateCommand(options Options) *cobra.Command {
 	var publication string
 	var postID string
 	var title string
+	var subtitle string
 	var markdownFile string
 	var correlationMarker string
 	var asJSON bool
 	command := &cobra.Command{
 		Use:   "update",
-		Short: "Update the title and body of an unscheduled, unpublished draft",
+		Short: "Update the title, subtitle, and body of an unscheduled, unpublished draft",
 		Args:  rejectPositionalArguments,
 		Example: "  pp-substack drafts update --publication gtmengineersearch " +
 			"--post-id 208706412 --title \"Updated GTM jobs this week\" " +
@@ -299,10 +301,18 @@ func newDraftUpdateCommand(options Options) *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("convert --markdown-file: %w", err)
 			}
+			// Absent --subtitle preserves whatever the draft carries; the flag
+			// is what makes the subtitle caller-authored, and passing it empty
+			// clears an existing one.
+			var authoredSubtitle *string
+			if command.Flags().Changed("subtitle") {
+				authoredSubtitle = &subtitle
+			}
 			result, err := service.UpdateDraft(
 				command.Context(),
 				postID,
 				title,
+				authoredSubtitle,
 				body,
 				correlationMarker,
 			)
@@ -315,6 +325,12 @@ func newDraftUpdateCommand(options Options) *cobra.Command {
 	command.Flags().StringVar(&publication, "publication", "", "Substack publication slug")
 	command.Flags().StringVar(&postID, "post-id", "", "External Substack draft ID")
 	command.Flags().StringVar(&title, "title", "", "Newsletter draft title")
+	command.Flags().StringVar(
+		&subtitle,
+		"subtitle",
+		"",
+		"Newsletter draft subtitle; omit to preserve the draft's existing one",
+	)
 	command.Flags().StringVar(&markdownFile, "markdown-file", "", "Path to the rendered Markdown issue")
 	command.Flags().StringVar(
 		&correlationMarker,
