@@ -7,7 +7,7 @@ of unscheduled, unpublished drafts.
 
 Safety rules:
 
-- `drafts update` may change only the title and body of an existing draft. It
+- `drafts update` may change only the title, subtitle, and body of an existing draft. It
   must read lifecycle state immediately before mutation and refuse scheduled
   or published posts.
 - No scheduling, publishing, sending, subscriber, Notes, analytics, or

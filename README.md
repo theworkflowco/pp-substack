@@ -99,14 +99,20 @@ pp-substack drafts compare --publication <slug> --post-id <id> \
 pp-substack drafts find --publication <slug> \
   --correlation-marker <marker> --json
 pp-substack drafts update --publication <slug> --post-id <id> \
-  --title <title> --markdown-file <path> \
+  --title <title> [--subtitle <subtitle>] --markdown-file <path> \
   --correlation-marker <marker> --json
 pp-substack posts get --publication <slug> --post-id <id> --json
 ```
 
-`drafts update` changes only the title and body of an existing draft. It reads
-lifecycle state immediately before mutation and refuses scheduled or published
-posts. No scheduling, publishing, sending, subscriber, Notes, analytics, or
+`drafts update` changes only the title, subtitle, and body of an existing
+draft. It reads lifecycle state immediately before mutation and refuses
+scheduled or published posts.
+
+`--subtitle` is optional and decides who owns that field. Omitted, the update
+round-trips whatever subtitle the draft already carries, so a subtitle set by
+hand in Substack survives every sync. Supplied, the caller authors it and it
+replaces what is there — including `--subtitle ""`, which is the deliberate
+way to clear one. Nothing else about the draft is touched either way. No scheduling, publishing, sending, subscriber, Notes, analytics, or
 browser-login commands are approved.
 
 Every automation command requires `--json`. `drafts find` and `posts get`
