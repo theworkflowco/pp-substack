@@ -62,6 +62,16 @@ func ToProseMirror(source string, correlationMarker string) (string, error) {
 			continue
 		}
 
+		if strings.HasPrefix(line, "![") {
+			image, err := parseImageLine(line)
+			if err != nil {
+				return "", err
+			}
+			content = append(content, image)
+			index++
+			continue
+		}
+
 		if caption, ok := strings.CutPrefix(line, "::subscribe::"); ok {
 			caption = strings.TrimSpace(caption)
 			if caption == "" {
@@ -164,6 +174,7 @@ func ToProseMirror(source string, correlationMarker string) (string, error) {
 				strings.HasPrefix(next, "- ") ||
 				strings.HasPrefix(next, ">") ||
 				strings.HasPrefix(next, "::subscribe::") ||
+				strings.HasPrefix(next, "![") ||
 				next == "---" {
 				break
 			}
@@ -365,4 +376,48 @@ func unescape(text string) string {
 		builder.WriteByte('\\')
 	}
 	return html.UnescapeString(builder.String())
+}
+
+// parseImageLine converts one standalone `![alt](https://…)` line into a
+// captioned-image node. Images are block-level only: the whole line is the
+// image, alt text is required (it is the only accessible description the
+// email client gets), and the target allowlist is narrower than the link
+// allowlist — absolute https URLs with a host, nothing else, because the
+// URL ships inside subscriber email where http and data targets are either
+// blocked or a smuggling surface. The node shape (captionedImage wrapping
+// image2) mirrors the shape Substack's own editor writes; verify against a
+// live draft before pinning a release on it.
+func parseImageLine(line string) (node, error) {
+	rest, ok := strings.CutPrefix(line, "![")
+	if !ok {
+		return node{}, fmt.Errorf("image line must start with ![: %s", line)
+	}
+	altEnd := strings.Index(rest, "](")
+	if altEnd < 0 {
+		return node{}, fmt.Errorf("image line is missing ]( after the alt text: %s", line)
+	}
+	alt := strings.TrimSpace(unescape(rest[:altEnd]))
+	if alt == "" {
+		return node{}, fmt.Errorf("image alt text must not be empty: %s", line)
+	}
+	target := rest[altEnd+2:]
+	closing := strings.Index(target, ")")
+	if closing < 0 || closing != len(target)-1 {
+		return node{}, fmt.Errorf("image line must end exactly at the closing ): %s", line)
+	}
+	target = target[:closing]
+	parsed, err := url.Parse(target)
+	if err != nil {
+		return node{}, fmt.Errorf("image target is not a valid URL: %s", target)
+	}
+	if parsed.Scheme != "https" || parsed.Host == "" {
+		return node{}, fmt.Errorf("image target must be an absolute https URL: %s", target)
+	}
+	return node{
+		Type: "captionedImage",
+		Content: []node{{
+			Type:  "image2",
+			Attrs: map[string]any{"src": target, "alt": alt},
+		}},
+	}, nil
 }
