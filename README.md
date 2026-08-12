@@ -102,6 +102,7 @@ pp-substack drafts update --publication <slug> --post-id <id> \
   --title <title> [--subtitle <subtitle>] --markdown-file <path> \
   --correlation-marker <marker> --json
 pp-substack posts get --publication <slug> --post-id <id> --json
+pp-substack images upload --publication <slug> --file <path> --json
 ```
 
 `drafts update` changes only the title, subtitle, and body of an existing
@@ -114,6 +115,11 @@ hand in Substack survives every sync. Supplied, the caller authors it and it
 replaces what is there — including `--subtitle ""`, which is the deliberate
 way to clear one. Nothing else about the draft is touched either way. No scheduling, publishing, sending, subscriber, Notes, analytics, or
 browser-login commands are approved.
+
+`images upload` sends one PNG or JPEG (sniffed from the bytes, 5 MiB cap)
+to the publication's image endpoint and prints `{"url":"https://…"}` — the
+durable storage URL to reference from a draft body's `![alt](url)` line. It
+never touches drafts or posts.
 
 Every automation command requires `--json`. `drafts find` and `posts get`
 return `{"found":false}` when absence is authoritative; the `post` key is

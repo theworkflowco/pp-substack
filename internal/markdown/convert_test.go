@@ -432,3 +432,127 @@ func TestToProseMirrorRejectsLinkTargetsOutsideAllowedSchemes(t *testing.T) {
 		})
 	}
 }
+
+func TestToProseMirrorConvertsStandaloneImageLine(t *testing.T) {
+	t.Parallel()
+
+	const marker = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
+	input := strings.Join([]string{
+		"Four of the nine roles require Claude by name.",
+		"",
+		"![Edition 004 tools chart](https://gtmengineersearch.com/shortlist/edition-004-tools.png)",
+		"",
+		"Issue reference: " + marker,
+		"",
+	}, "\n")
+
+	body, err := markdown.ToProseMirror(input, marker)
+	if err != nil {
+		t.Fatalf("ToProseMirror() error = %v", err)
+	}
+
+	var document struct {
+		Type    string `json:"type"`
+		Content []struct {
+			Type    string `json:"type"`
+			Content []struct {
+				Type  string `json:"type"`
+				Attrs struct {
+					Src string `json:"src"`
+					Alt string `json:"alt"`
+				} `json:"attrs"`
+			} `json:"content"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(body), &document); err != nil {
+		t.Fatalf("body is not JSON: %v", err)
+	}
+	if len(document.Content) != 3 {
+		t.Fatalf("top-level node count = %d, want 3", len(document.Content))
+	}
+	image := document.Content[1]
+	if image.Type != "captionedImage" {
+		t.Fatalf("second node type = %q, want captionedImage", image.Type)
+	}
+	if len(image.Content) != 1 || image.Content[0].Type != "image2" {
+		t.Fatalf("captionedImage content = %#v, want one image2 node", image.Content)
+	}
+	attrs := image.Content[0].Attrs
+	if attrs.Src != "https://gtmengineersearch.com/shortlist/edition-004-tools.png" {
+		t.Fatalf("image src = %q", attrs.Src)
+	}
+	if attrs.Alt != "Edition 004 tools chart" {
+		t.Fatalf("image alt = %q", attrs.Alt)
+	}
+}
+
+func TestToProseMirrorImageInterruptsAParagraphRun(t *testing.T) {
+	t.Parallel()
+
+	const marker = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
+	input := strings.Join([]string{
+		"Lead-in sentence " + marker + ".",
+		"![Chart](https://example.com/chart.png)",
+		"Trailing sentence.",
+	}, "\n")
+
+	body, err := markdown.ToProseMirror(input, marker)
+	if err != nil {
+		t.Fatalf("ToProseMirror() error = %v", err)
+	}
+	var document struct {
+		Content []struct {
+			Type string `json:"type"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(body), &document); err != nil {
+		t.Fatalf("body is not JSON: %v", err)
+	}
+	types := make([]string, 0, len(document.Content))
+	for _, n := range document.Content {
+		types = append(types, n.Type)
+	}
+	want := []string{"paragraph", "captionedImage", "paragraph"}
+	if len(types) != len(want) {
+		t.Fatalf("node types = %v, want %v", types, want)
+	}
+	for i := range want {
+		if types[i] != want[i] {
+			t.Fatalf("node types = %v, want %v", types, want)
+		}
+	}
+}
+
+func TestToProseMirrorRejectsImageWithDisallowedTarget(t *testing.T) {
+	t.Parallel()
+
+	const marker = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
+	for _, target := range []string{
+		"http://example.com/chart.png",
+		"data:image/png;base64,AAAA",
+		"../assets/chart.png",
+		"javascript:alert(1)",
+	} {
+		input := "![Chart](" + target + ")\n\nIssue reference: " + marker + "\n"
+		if _, err := markdown.ToProseMirror(input, marker); err == nil {
+			t.Fatalf("ToProseMirror() accepted image target %q, want error", target)
+		}
+	}
+}
+
+func TestToProseMirrorRejectsMalformedImageLines(t *testing.T) {
+	t.Parallel()
+
+	const marker = "gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"
+	for _, line := range []string{
+		"![Chart](https://example.com/chart.png) trailing prose",
+		"![Chart](https://example.com/chart.png",
+		"![Chart]",
+		"![](https://example.com/chart.png)",
+	} {
+		input := line + "\n\nIssue reference: " + marker + "\n"
+		if _, err := markdown.ToProseMirror(input, marker); err == nil {
+			t.Fatalf("ToProseMirror() accepted malformed image line %q, want error", line)
+		}
+	}
+}
