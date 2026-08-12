@@ -3,6 +3,7 @@ package substack
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -782,4 +783,54 @@ func safePath(endpoint string) string {
 		return "Substack endpoint"
 	}
 	return parsed.EscapedPath()
+}
+
+type UploadedImage struct {
+	URL string `json:"url"`
+}
+
+// UploadImage posts the image to the publication's image endpoint as a
+// base64 data URI and returns the durable storage URL Substack assigns.
+// The response URL must be absolute https — anything else is treated as an
+// endpoint contract change and fails loud, because the URL is committed
+// into an edition body and ships inside subscriber email.
+func (client *Client) UploadImage(
+	ctx context.Context,
+	contentType string,
+	imageBytes []byte,
+) (UploadedImage, error) {
+	if contentType != "image/png" && contentType != "image/jpeg" {
+		return UploadedImage{}, fmt.Errorf(
+			"image content type must be image/png or image/jpeg, got %q", contentType,
+		)
+	}
+	if len(imageBytes) == 0 {
+		return UploadedImage{}, fmt.Errorf("image payload must not be empty")
+	}
+	payload := map[string]string{
+		"image": "data:" + contentType + ";base64," +
+			base64.StdEncoding.EncodeToString(imageBytes),
+	}
+	var response struct {
+		URL *string `json:"url"`
+	}
+	if err := client.requestJSON(
+		ctx,
+		http.MethodPost,
+		client.publicationBaseURL+"/api/v1/image",
+		payload,
+		&response,
+	); err != nil {
+		return UploadedImage{}, err
+	}
+	if response.URL == nil || strings.TrimSpace(*response.URL) == "" {
+		return UploadedImage{}, fmt.Errorf("image upload response is missing url")
+	}
+	parsed, err := url.Parse(strings.TrimSpace(*response.URL))
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+		return UploadedImage{}, fmt.Errorf(
+			"image upload returned a URL that is not absolute https",
+		)
+	}
+	return UploadedImage{URL: parsed.String()}, nil
 }

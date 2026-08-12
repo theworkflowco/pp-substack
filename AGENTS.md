@@ -1,9 +1,11 @@
 # Agent Instructions
 
-The approved command contract contains exactly five leaf command shapes:
-`version`, `drafts create`, `drafts find`, `drafts update`, and `posts get`.
-All five are exposed. `drafts update` is limited to changing the title and body
-of unscheduled, unpublished drafts.
+The approved command contract contains exactly seven leaf command shapes:
+`version`, `drafts create`, `drafts compare`, `drafts find`, `drafts update`,
+`posts get`, and `images upload`. All seven are exposed. `drafts update` is limited to changing
+the title and body of unscheduled, unpublished drafts. `images upload` sends
+one PNG or JPEG to the publication's image endpoint and prints the durable
+URL; it never touches drafts or posts.
 
 Safety rules:
 

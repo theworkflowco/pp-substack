@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -43,6 +44,11 @@ type Service interface {
 	) (substack.DraftComparison, error)
 	FindByMarker(ctx context.Context, correlationMarker string) (substack.Found, error)
 	GetPost(ctx context.Context, postID string) (substack.Found, error)
+	UploadImage(
+		ctx context.Context,
+		contentType string,
+		imageBytes []byte,
+	) (substack.UploadedImage, error)
 }
 
 type Options struct {
@@ -81,6 +87,15 @@ func NewRoot(options Options) *cobra.Command {
 	drafts.AddCommand(newDraftFindCommand(options))
 	drafts.AddCommand(newDraftUpdateCommand(options))
 	root.AddCommand(drafts)
+
+	images := &cobra.Command{
+		Use:   "images",
+		Short: "Upload images for use in draft bodies",
+		Args:  rejectPositionalArguments,
+		RunE:  showHelp,
+	}
+	images.AddCommand(newImageUploadCommand(options))
+	root.AddCommand(images)
 
 	posts := &cobra.Command{
 		Use:   "posts",
@@ -482,4 +497,66 @@ func withDefaults(options Options) Options {
 		}
 	}
 	return options
+}
+
+const imageUploadMaxBytes = 5 << 20
+
+func newImageUploadCommand(options Options) *cobra.Command {
+	var publication string
+	var file string
+	var asJSON bool
+	command := &cobra.Command{
+		Use:   "upload",
+		Short: "Upload one PNG or JPEG and print its durable Substack URL",
+		Args:  rejectPositionalArguments,
+		Example: "  pp-substack images upload --publication gtmengineersearch " +
+			"--file ./edition-004-tools.png --json",
+		RunE: func(command *cobra.Command, _ []string) error {
+			if err := validateJSONAndPublication(asJSON, publication); err != nil {
+				return err
+			}
+			if strings.TrimSpace(file) == "" {
+				return requiredFlag("file")
+			}
+			payload, err := options.ReadFile(file)
+			if err != nil {
+				return usageError(fmt.Sprintf("read image file: %v", err))
+			}
+			contentType, err := imageContentType(payload)
+			if err != nil {
+				return usageError(err.Error())
+			}
+			if len(payload) > imageUploadMaxBytes {
+				return usageError(fmt.Sprintf(
+					"image file is %d bytes; the upload cap is %d",
+					len(payload), imageUploadMaxBytes,
+				))
+			}
+			service, err := authenticatedService(options, publication)
+			if err != nil {
+				return err
+			}
+			result, err := service.UploadImage(command.Context(), contentType, payload)
+			if err != nil {
+				return err
+			}
+			return printJSON(command, result)
+		},
+	}
+	command.Flags().StringVar(&publication, "publication", "", "Substack publication slug")
+	command.Flags().StringVar(&file, "file", "", "Path to the PNG or JPEG to upload")
+	command.Flags().BoolVar(&asJSON, "json", false, "Write the stable JSON response contract")
+	return command
+}
+
+// imageContentType sniffs the payload's magic bytes; the file extension is
+// never trusted because the bytes are what actually reach Substack.
+func imageContentType(payload []byte) (string, error) {
+	switch {
+	case bytes.HasPrefix(payload, []byte("\x89PNG\r\n\x1a\n")):
+		return "image/png", nil
+	case bytes.HasPrefix(payload, []byte{0xFF, 0xD8, 0xFF}):
+		return "image/jpeg", nil
+	}
+	return "", fmt.Errorf("image file must be PNG or JPEG (magic bytes did not match)")
 }

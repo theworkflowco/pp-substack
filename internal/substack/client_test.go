@@ -1,7 +1,9 @@
 package substack_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2774,4 +2776,119 @@ func equalStringPointers(left *string, right *string) bool {
 		return left == nil && right == nil
 	}
 	return *left == *right
+}
+
+func TestUploadImageSendsDataURIAndReturnsURL(t *testing.T) {
+	t.Parallel()
+
+	imageBytes := []byte("\x89PNG\r\n\x1a\nsynthetic-image-bytes")
+	const storedURL = "https://substack-post-media.s3.amazonaws.com/public/images/synthetic_10x10.png"
+	var requestCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(
+		response http.ResponseWriter,
+		request *http.Request,
+	) {
+		requestCount.Add(1)
+		if request.Method != http.MethodPost || request.URL.Path != "/api/v1/image" {
+			t.Errorf("unexpected request %s %s", request.Method, request.URL.Path)
+		}
+		if request.Header.Get("Cookie") == "" {
+			t.Errorf("request is missing the session cookie")
+		}
+		var body struct {
+			Image string `json:"image"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Errorf("decode request body: %v", err)
+		}
+		wantPrefix := "data:image/png;base64,"
+		if !strings.HasPrefix(body.Image, wantPrefix) {
+			t.Errorf("image payload prefix = %.40q, want %q", body.Image, wantPrefix)
+		}
+		decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(body.Image, wantPrefix))
+		if err != nil || !bytes.Equal(decoded, imageBytes) {
+			t.Errorf("decoded payload mismatch (err=%v)", err)
+		}
+		writeJSON(t, response, http.StatusOK, map[string]any{"url": storedURL, "id": 7})
+	}))
+	defer server.Close()
+
+	client := mustClient(t, server, "connect.sid=synthetic-session")
+	uploaded, err := client.UploadImage(context.Background(), "image/png", imageBytes)
+	if err != nil {
+		t.Fatalf("UploadImage() error = %v", err)
+	}
+	if uploaded.URL != storedURL {
+		t.Fatalf("UploadImage() url = %q, want %q", uploaded.URL, storedURL)
+	}
+	if requestCount.Load() != 1 {
+		t.Fatalf("request count = %d, want 1", requestCount.Load())
+	}
+}
+
+func TestUploadImageRejectsBadInputWithoutRequests(t *testing.T) {
+	t.Parallel()
+
+	var requestCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(
+		response http.ResponseWriter,
+		_ *http.Request,
+	) {
+		requestCount.Add(1)
+		writeJSON(t, response, http.StatusOK, map[string]any{})
+	}))
+	defer server.Close()
+	client := mustClient(t, server, "connect.sid=synthetic-session")
+
+	if _, err := client.UploadImage(context.Background(), "image/gif", []byte("x")); err == nil {
+		t.Fatalf("UploadImage() accepted image/gif, want error")
+	}
+	if _, err := client.UploadImage(context.Background(), "image/png", nil); err == nil {
+		t.Fatalf("UploadImage() accepted empty payload, want error")
+	}
+	if requestCount.Load() != 0 {
+		t.Fatalf("request count = %d, want 0", requestCount.Load())
+	}
+}
+
+func TestUploadImageFailsLoudOnBrokenResponses(t *testing.T) {
+	t.Parallel()
+
+	for name, body := range map[string]map[string]any{
+		"missing url": {"id": 7},
+		"empty url":   {"url": ""},
+		"non-https":   {"url": "http://substack-post-media.s3.amazonaws.com/x.png"},
+		"relative":    {"url": "/public/images/x.png"},
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(
+			response http.ResponseWriter,
+			_ *http.Request,
+		) {
+			writeJSON(t, response, http.StatusOK, body)
+		}))
+		client := mustClient(t, server, "connect.sid=synthetic-session")
+		_, err := client.UploadImage(context.Background(), "image/png", []byte("\x89PNG"))
+		server.Close()
+		if err == nil {
+			t.Fatalf("UploadImage() with %s response succeeded, want error", name)
+		}
+	}
+}
+
+func TestUploadImageSurfacesHTTPError(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(
+		response http.ResponseWriter,
+		_ *http.Request,
+	) {
+		writeJSON(t, response, http.StatusForbidden, map[string]any{})
+	}))
+	defer server.Close()
+	client := mustClient(t, server, "connect.sid=synthetic-session")
+	_, err := client.UploadImage(context.Background(), "image/png", []byte("\x89PNG"))
+	var httpError *substack.HTTPError
+	if !errors.As(err, &httpError) || httpError.StatusCode != http.StatusForbidden {
+		t.Fatalf("UploadImage() error = %v, want HTTPError 403", err)
+	}
 }

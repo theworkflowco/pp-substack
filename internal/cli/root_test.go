@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -23,7 +24,7 @@ func TestVersionJSON(t *testing.T) {
 	assertJSONEqual(t, output, `{"version":"0.1.0"}`)
 }
 
-func TestRootExposesOnlySixLeafCommands(t *testing.T) {
+func TestRootExposesOnlySevenLeafCommands(t *testing.T) {
 	t.Parallel()
 
 	root := cli.NewRoot(cli.Options{Version: "0.1.0"})
@@ -69,6 +70,7 @@ func TestRootExposesOnlySixLeafCommands(t *testing.T) {
 		"drafts create",
 		"drafts find",
 		"drafts update",
+		"images upload",
 		"posts get",
 		"version",
 	}
@@ -947,27 +949,32 @@ func TestExitCodeClassifiesAuthRemoteAndContractFailures(t *testing.T) {
 }
 
 type fakeService struct {
-	createResult   substack.Draft
-	createTitle    string
-	createBody     string
-	updateResult   substack.UpdatedDraft
-	updateCalls    int
-	updatePostID   string
-	updateTitle    string
-	updateSubtitle *string
-	updateBody     string
-	updateMarker   string
-	updateError    error
-	compareResult  substack.DraftComparison
-	compareCalls   int
-	comparePostID  string
-	compareTitle   string
-	compareBody    string
-	compareMarker  string
-	findResult     substack.Found
-	findError      error
-	getResult      substack.Found
-	getError       error
+	uploadResult      substack.UploadedImage
+	uploadError       error
+	uploadCalls       int
+	uploadContentType string
+	uploadBytes       []byte
+	createResult      substack.Draft
+	createTitle       string
+	createBody        string
+	updateResult      substack.UpdatedDraft
+	updateCalls       int
+	updatePostID      string
+	updateTitle       string
+	updateSubtitle    *string
+	updateBody        string
+	updateMarker      string
+	updateError       error
+	compareResult     substack.DraftComparison
+	compareCalls      int
+	comparePostID     string
+	compareTitle      string
+	compareBody       string
+	compareMarker     string
+	findResult        substack.Found
+	findError         error
+	getResult         substack.Found
+	getError          error
 }
 
 func (fake *fakeService) CreateDraft(
@@ -1072,4 +1079,141 @@ func assertJSONEqual(t *testing.T, actual string, expected string) {
 	if !bytes.Equal(actualEncoded, expectedEncoded) {
 		t.Fatalf("actual = %s, want %s", actualEncoded, expectedEncoded)
 	}
+}
+
+func TestImageUploadCommandUploadsAndPrintsURL(t *testing.T) {
+	t.Parallel()
+
+	service := &fakeService{
+		uploadResult: substack.UploadedImage{
+			URL: "https://substack-post-media.s3.amazonaws.com/public/images/synthetic_2400x2400.png",
+		},
+	}
+	pngBytes := []byte("\x89PNG\r\n\x1a\nsynthetic")
+	options := cli.Options{
+		LookupEnv: envWith("PP_SUBSTACK_SESSION_COOKIE", "connect.sid=synthetic"),
+		ReadFile: func(path string) ([]byte, error) {
+			if path != "./edition-004-tools.png" {
+				t.Fatalf("ReadFile path = %q", path)
+			}
+			return pngBytes, nil
+		},
+		NewService: func(publication string, cookie string) (cli.Service, error) {
+			if publication != "gtmengineersearch" {
+				t.Fatalf("publication = %q", publication)
+			}
+			return service, nil
+		},
+	}
+	stdout, err := execute(t, options,
+		"images", "upload",
+		"--publication", "gtmengineersearch",
+		"--file", "./edition-004-tools.png",
+		"--json",
+	)
+	if err != nil {
+		t.Fatalf("execute() error = %v", err)
+	}
+	if service.uploadCalls != 1 {
+		t.Fatalf("upload calls = %d, want 1", service.uploadCalls)
+	}
+	if service.uploadContentType != "image/png" {
+		t.Fatalf("content type = %q, want image/png", service.uploadContentType)
+	}
+	assertJSONEqual(t, stdout,
+		`{"url":"https://substack-post-media.s3.amazonaws.com/public/images/synthetic_2400x2400.png"}`)
+}
+
+func TestImageUploadCommandDetectsJPEG(t *testing.T) {
+	t.Parallel()
+
+	service := &fakeService{uploadResult: substack.UploadedImage{URL: "https://example.com/x.jpg"}}
+	options := cli.Options{
+		LookupEnv: envWith("PP_SUBSTACK_SESSION_COOKIE", "connect.sid=synthetic"),
+		ReadFile: func(string) ([]byte, error) {
+			return []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00}, nil
+		},
+		NewService: func(string, string) (cli.Service, error) { return service, nil },
+	}
+	if _, err := execute(t, options,
+		"images", "upload", "--publication", "gtmengineersearch",
+		"--file", "photo.jpg", "--json",
+	); err != nil {
+		t.Fatalf("execute() error = %v", err)
+	}
+	if service.uploadContentType != "image/jpeg" {
+		t.Fatalf("content type = %q, want image/jpeg", service.uploadContentType)
+	}
+}
+
+func TestImageUploadCommandRejectsBadInputsWithoutUploading(t *testing.T) {
+	t.Parallel()
+
+	service := &fakeService{}
+	base := func(readFile func(string) ([]byte, error)) cli.Options {
+		return cli.Options{
+			LookupEnv:  envWith("PP_SUBSTACK_SESSION_COOKIE", "connect.sid=synthetic"),
+			ReadFile:   readFile,
+			NewService: func(string, string) (cli.Service, error) { return service, nil },
+		}
+	}
+	cases := map[string]struct {
+		options cli.Options
+		args    []string
+	}{
+		"missing file flag": {
+			options: base(func(string) ([]byte, error) { return nil, nil }),
+			args:    []string{"images", "upload", "--publication", "gtmengineersearch", "--json"},
+		},
+		"unreadable file": {
+			options: base(func(string) ([]byte, error) { return nil, fmt.Errorf("no such file") }),
+			args: []string{"images", "upload", "--publication", "gtmengineersearch",
+				"--file", "missing.png", "--json"},
+		},
+		"not an image": {
+			options: base(func(string) ([]byte, error) { return []byte("plain text"), nil }),
+			args: []string{"images", "upload", "--publication", "gtmengineersearch",
+				"--file", "notes.txt", "--json"},
+		},
+		"oversized image": {
+			options: base(func(string) ([]byte, error) {
+				payload := make([]byte, (5<<20)+1)
+				copy(payload, "\x89PNG\r\n\x1a\n")
+				return payload, nil
+			}),
+			args: []string{"images", "upload", "--publication", "gtmengineersearch",
+				"--file", "huge.png", "--json"},
+		},
+	}
+	for name, test := range cases {
+		if _, err := execute(t, test.options, test.args...); err == nil {
+			t.Fatalf("%s: execute() succeeded, want error", name)
+		}
+	}
+	if service.uploadCalls != 0 {
+		t.Fatalf("upload calls = %d, want 0", service.uploadCalls)
+	}
+}
+
+func envWith(name string, value string) func(string) (string, bool) {
+	return func(key string) (string, bool) {
+		if key == name {
+			return value, true
+		}
+		return "", false
+	}
+}
+
+func (service *fakeService) UploadImage(
+	_ context.Context,
+	contentType string,
+	imageBytes []byte,
+) (substack.UploadedImage, error) {
+	service.uploadCalls++
+	service.uploadContentType = contentType
+	service.uploadBytes = imageBytes
+	if service.uploadError != nil {
+		return substack.UploadedImage{}, service.uploadError
+	}
+	return service.uploadResult, nil
 }
