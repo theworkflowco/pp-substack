@@ -575,6 +575,7 @@ func TestDraftsFindFoundEmitsNormalizedPost(t *testing.T) {
 		`{"found":true,"post":{
 			"post_id":"208706412",
 			"post_url":"https://gtmengineersearch.substack.com/publish/post/208706412",
+				"reader_url":null,
 			"status":"draft",
 			"scheduled_at":null,
 			"published_at":null,
@@ -625,6 +626,7 @@ func TestPostsGetReturnsFoundEnvelope(t *testing.T) {
 			"post":{
 				"post_id":"208706412",
 				"post_url":"https://gtmengineersearch.substack.com/publish/post/208706412",
+				"reader_url":null,
 				"status":"draft",
 				"scheduled_at":null,
 				"published_at":null,
@@ -662,6 +664,7 @@ func TestPostsGetEmitsScheduledPublishedAndDeletedStates(t *testing.T) {
 			expected: `{"found":true,"post":{
 				"post_id":"208706412",
 				"post_url":"https://gtmengineersearch.substack.com/publish/post/208706412",
+				"reader_url":null,
 				"status":"scheduled",
 				"scheduled_at":"` + scheduledAt + `",
 				"published_at":null,
@@ -682,6 +685,7 @@ func TestPostsGetEmitsScheduledPublishedAndDeletedStates(t *testing.T) {
 			expected: `{"found":true,"post":{
 				"post_id":"208706412",
 				"post_url":"https://gtmengineersearch.substack.com/publish/post/208706412",
+				"reader_url":null,
 				"status":"published",
 				"scheduled_at":"` + scheduledAt + `",
 				"published_at":"` + publishedAt + `",

@@ -2892,3 +2892,140 @@ func TestUploadImageSurfacesHTTPError(t *testing.T) {
 		t.Fatalf("UploadImage() error = %v, want HTTPError 403", err)
 	}
 }
+
+func scheduledDetailServer(t *testing.T, extra map[string]any) *httptest.Server {
+	t.Helper()
+	body := map[string]any{
+		"id":               208706412,
+		"draft_body":       proseMirrorWith("gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"),
+		"draft_updated_at": "2026-07-31T14:00:00.000Z",
+		"postSchedules": []any{
+			map[string]any{"trigger_at": "2026-07-28T16:00:00Z"},
+		},
+	}
+	for key, value := range extra {
+		body[key] = value
+	}
+	return newRouteServer(t, map[string]routeResponse{
+		"/api/v1/drafts/208706412": {status: http.StatusOK, body: body},
+	})
+}
+
+func publicReaderURL(server *httptest.Server, path string) string {
+	return strings.Replace(server.URL, "http://", "https://", 1) + path
+}
+
+func TestGetPostReturnsScheduledReaderURLFromSlug(t *testing.T) {
+	t.Parallel()
+
+	server := scheduledDetailServer(t, map[string]any{"slug": "edition-028-gtm-engineer-jobs"})
+	defer server.Close()
+
+	result, err := mustClient(t, server, "connect.sid=session").GetPost(context.Background(), "208706412")
+	if err != nil {
+		t.Fatalf("GetPost() error = %v", err)
+	}
+	if result.Post == nil || result.Post.Status != "scheduled" {
+		t.Fatalf("result = %#v, want scheduled post", result)
+	}
+	want := publicReaderURL(server, "/p/edition-028-gtm-engineer-jobs")
+	if result.Post.ReaderURL == nil || *result.Post.ReaderURL != want {
+		t.Fatalf("ReaderURL = %#v, want %q", result.Post.ReaderURL, want)
+	}
+	if result.Post.PostURL != server.URL+"/publish/post/208706412" {
+		t.Fatalf("PostURL = %q, want management URL", result.Post.PostURL)
+	}
+}
+
+func TestGetPostReturnsScheduledReaderURLFromCanonicalURL(t *testing.T) {
+	t.Parallel()
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(
+		response http.ResponseWriter,
+		request *http.Request,
+	) {
+		if request.URL.Path != "/api/v1/drafts/208706412" {
+			t.Fatalf("unexpected request: %s %s", request.Method, request.URL.Path)
+		}
+		writeJSON(t, response, http.StatusOK, map[string]any{
+			"id":               208706412,
+			"draft_body":       proseMirrorWith("gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"),
+			"draft_updated_at": "2026-07-31T14:00:00.000Z",
+			"postSchedules": []any{
+				map[string]any{"trigger_at": "2026-07-28T16:00:00Z"},
+			},
+			"canonical_url": publicReaderURL(server, "/p/edition-028-gtm-engineer-jobs"),
+		})
+	}))
+	defer server.Close()
+
+	result, err := mustClient(t, server, "connect.sid=session").GetPost(context.Background(), "208706412")
+	if err != nil {
+		t.Fatalf("GetPost() error = %v", err)
+	}
+	want := publicReaderURL(server, "/p/edition-028-gtm-engineer-jobs")
+	if result.Post == nil || result.Post.ReaderURL == nil || *result.Post.ReaderURL != want {
+		t.Fatalf("result = %#v, want reader URL %q", result.Post, want)
+	}
+}
+
+func TestGetPostReturnsNullScheduledReaderURLWithoutSlug(t *testing.T) {
+	t.Parallel()
+
+	server := scheduledDetailServer(t, nil)
+	defer server.Close()
+
+	result, err := mustClient(t, server, "connect.sid=session").GetPost(context.Background(), "208706412")
+	if err != nil {
+		t.Fatalf("GetPost() error = %v", err)
+	}
+	if result.Post == nil || result.Post.Status != "scheduled" || result.Post.ReaderURL != nil {
+		t.Fatalf("result = %#v, want scheduled post with null reader URL", result.Post)
+	}
+	encoded, err := json.Marshal(result.Post)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if !strings.Contains(string(encoded), `"reader_url":null`) {
+		t.Fatalf("JSON = %s, want explicit null reader_url", encoded)
+	}
+}
+
+func TestGetPostRejectsUnsafeScheduledSlug(t *testing.T) {
+	t.Parallel()
+
+	server := scheduledDetailServer(t, map[string]any{"slug": "nested/path"})
+	defer server.Close()
+
+	result, err := mustClient(t, server, "connect.sid=session").GetPost(context.Background(), "208706412")
+	if err == nil || !strings.Contains(err.Error(), "slug") {
+		t.Fatalf("result = %#v, error = %v; want unsafe-slug error", result, err)
+	}
+}
+
+func TestGetPostOmitsReaderURLForDraft(t *testing.T) {
+	t.Parallel()
+
+	server := newRouteServer(t, map[string]routeResponse{
+		"/api/v1/drafts/208706412": {
+			status: http.StatusOK,
+			body: map[string]any{
+				"id":               208706412,
+				"draft_body":       proseMirrorWith("gtme-issue:781260b8-b753-5d4f-a4a7-4df56a2cf77d"),
+				"draft_updated_at": "2026-07-31T14:00:00.000Z",
+				"slug":             "edition-028-gtm-engineer-jobs",
+			},
+		},
+		"/api/v1/post_management/scheduled": {status: http.StatusOK, body: emptyScheduledUpdateFeed()},
+	})
+	defer server.Close()
+
+	result, err := mustClient(t, server, "connect.sid=session").GetPost(context.Background(), "208706412")
+	if err != nil {
+		t.Fatalf("GetPost() error = %v", err)
+	}
+	if result.Post == nil || result.Post.Status != "draft" || result.Post.ReaderURL != nil {
+		t.Fatalf("result = %#v, want draft with null reader URL", result.Post)
+	}
+}
