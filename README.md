@@ -150,6 +150,13 @@ The result must be an HTTPS `/p/<slug>` URL on the requested publication host.
 A missing or unsafe slug, unsafe management URL, or cross-publication host is a
 contract error.
 
+`reader_url` reports the public reader URL independently of `post_url`. It is
+`null` for drafts. For `scheduled`, it is the reader URL the post will publish
+under, built under the same checks from the `canonical_url` or `slug` Substack
+allocates by scheduling time, or `null` when Substack supplies neither; an
+unsafe value is a contract error. It is never derived from the title. For
+`published`, it equals `post_url`.
+
 The correlation marker must be a visible `gtme-issue:<uuid>` token that occurs
 exactly once in the Markdown. The converter supports heading levels 1–6,
 paragraphs, bullet lists, strong and italic emphasis, horizontal rules,

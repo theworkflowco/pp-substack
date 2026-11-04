@@ -73,3 +73,6 @@ reader URL. Validate Substack's `canonical_url` when present; otherwise use
 the published endpoint's `slug` with the already-verified publication host.
 A published read that cannot verify a safe same-publication HTTPS
 `/p/<slug>` URL fails loudly.
+`reader_url` is `null` for drafts, the verified future reader URL (or `null`
+when Substack supplies no slug) for scheduled posts, and equal to `post_url`
+for published posts.

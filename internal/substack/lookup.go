@@ -24,6 +24,7 @@ var correlationMarkerPattern = regexp.MustCompile(
 type Post struct {
 	PostID            string  `json:"post_id"`
 	PostURL           string  `json:"post_url"`
+	ReaderURL         *string `json:"reader_url"`
 	Status            string  `json:"status"`
 	ScheduledAt       *string `json:"scheduled_at"`
 	PublishedAt       *string `json:"published_at"`
@@ -563,6 +564,22 @@ func (client *Client) normalizePost(raw rawPost) (Post, error) {
 		status = "scheduled"
 		scheduledAt = schedule
 	}
+	var readerURL *string
+	switch status {
+	case "published":
+		readerURL = &postURL
+	case "scheduled":
+		// Substack allocates the slug by scheduling time; report the reader
+		// URL it will publish under, or null when Substack provides neither
+		// canonical_url nor slug. Never derive it from the title.
+		if hasText(raw.CanonicalURL) || hasText(raw.Slug) {
+			scheduledURL, err := client.publishedReaderURL(raw.CanonicalURL, raw.Slug)
+			if err != nil {
+				return Post{}, fmt.Errorf("scheduled %w", err)
+			}
+			readerURL = &scheduledURL
+		}
+	}
 	var draftUpdatedAt *string
 	if status != "published" && raw.DraftBody != "" {
 		if raw.DraftUpdatedAt == nil || strings.TrimSpace(*raw.DraftUpdatedAt) == "" {
@@ -577,6 +594,7 @@ func (client *Client) normalizePost(raw rawPost) (Post, error) {
 	return Post{
 		PostID:            id,
 		PostURL:           postURL,
+		ReaderURL:         readerURL,
 		Status:            status,
 		ScheduledAt:       scheduledAt,
 		PublishedAt:       publishedAt,
@@ -627,6 +645,10 @@ func (client *Client) publishedReaderURL(
 		)
 	}
 	return parsed.String(), nil
+}
+
+func hasText(value *string) bool {
+	return value != nil && strings.TrimSpace(*value) != ""
 }
 
 func scheduleTime(raw rawPost) *string {
